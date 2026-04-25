@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vehicle + Plate Detection | YOLO11n</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/frontend/style.css" />
+  </head>
+  <body>
+    <header class="topbar card">
+      <div class="brand">
+        <p class="kicker">ANPR Dashboard</p>
+        <h1>Vehicle + Plate Detection with YOLO11n</h1>
+      </div>
+      <nav class="navbar" aria-label="Primary">
+        <button class="nav-link active" data-page="detectPage">Detection</button>
+        <button class="nav-link" data-page="resultsPage">Model Results</button>
+        <button class="nav-link" data-page="aboutPage">About Project</button>
+      </nav>
+    </header>
+
+    <main class="app">
+      <section id="detectPage" class="page active">
+        <section class="card hero">
+          <h2>Live Detection</h2>
+          <p class="subtitle">
+            Upload an image and run either <strong>vehicle detection</strong> or <strong>license plate detection</strong>
+            with confidence, bounding boxes, and speed metrics.
+          </p>
+        </section>
+
+        <section class="card controls">
+          <div class="mode-switch" role="group" aria-label="Detection Mode">
+            <button id="vehicleModeBtn" class="mode-btn active" type="button" data-mode="vehicle">Vehicle Detection</button>
+            <button id="plateModeBtn" class="mode-btn" type="button" data-mode="plate">Plate Detection</button>
+            <button id="anprModeBtn" class="mode-btn" type="button" data-mode="anpr">ANPR (Plate + OCR)</button>
+          </div>
+          <label class="file-label" for="imageInput">Choose Image</label>
+          <input id="imageInput" type="file" accept="image/png, image/jpeg" />
+          <div class="confidence-control">
+            <label for="confidenceSlider">Confidence Threshold: <strong id="confidenceValue">0.25</strong></label>
+            <input id="confidenceSlider" type="range" min="0.05" max="0.95" step="0.01" value="0.25" />
+          </div>
+          <div class="confidence-control" id="ocrConfidenceControl">
+            <label for="ocrConfidenceSlider">OCR Confidence: <strong id="ocrConfidenceValue">0.30</strong></label>
+            <input id="ocrConfidenceSlider" type="range" min="0.05" max="0.95" step="0.01" value="0.30" />
+          </div>
+          <button id="detectBtn">Detect Vehicles</button>
+          <p id="statusText">Waiting for image upload.</p>
+        </section>
+
+        <section class="grid">
+          <article class="card panel">
+            <h2>Original</h2>
+            <img id="previewImage" alt="Uploaded preview" />
+          </article>
+          <article class="card panel">
+            <h2>Annotated Output</h2>
+            <img id="annotatedImage" alt="Detection result" />
+          </article>
+        </section>
+
+        <section class="card metrics">
+          <div class="metric">
+            <span>Inference Time</span>
+            <strong id="inferenceTime">-</strong>
+          </div>
+          <div class="metric">
+            <span>Model Size</span>
+            <strong id="modelSize">-</strong>
+          </div>
+          <div class="metric">
+            <span>Runtime Device</span>
+            <strong id="runtimeDevice">-</strong>
+          </div>
+        </section>
+
+        <section id="anprTimingsCard" class="card anpr-timings">
+          <h2>ANPR Timing Breakdown</h2>
+          <div class="timing-grid">
+            <div class="timing-item">
+              <span>Detection</span>
+              <strong id="anprDetectionTime">-</strong>
+            </div>
+            <div class="timing-item">
+              <span>OCR</span>
+              <strong id="anprOcrTime">-</strong>
+            </div>
+            <div class="timing-item">
+              <span>Total</span>
+              <strong id="anprTotalTime">-</strong>
+            </div>
+            <div class="timing-item">
+              <span>OCR Backend</span>
+              <strong id="ocrBackend">-</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="card detections">
+          <h2 id="detectionsHeading">Detected Vehicles</h2>
+          <ul id="detectionList"></ul>
+          <p id="baselineMap" class="baseline"></p>
+        </section>
+      </section>
+
+      <section id="resultsPage" class="page">
+        <section class="card hero">
+          <h2>Model Evaluation Snapshot</h2>
+          <p class="subtitle">Consolidated training, validation, and runtime metrics measured for this project.</p>
+        </section>
+
+        <section class="stats-grid">
+          <article class="card result-block">
+            <h3>Leaderboard Qualification (Live)</h3>
+            <ul class="result-list">
+              <li><span>Overall status</span><strong id="leaderboardOverall">Pending report</strong></li>
+              <li><span>FLOPs (<= 5)</span><strong id="leaderboardFlops">-</strong></li>
+              <li><span>Latency mean (<= 250 ms)</span><strong id="leaderboardLatency">-</strong></li>
+              <li><span>Plate mAP@0.5 (>= 0.85)</span><strong id="leaderboardPlate">-</strong></li>
+              <li><span>Vehicle mAP@0.5 (>= 0.50)</span><strong id="leaderboardVehicle">-</strong></li>
+              <li><span>OCR char accuracy (>= 0.80)</span><strong id="leaderboardOcr">-</strong></li>
+              <li><span>Robustness retention (>= 0.70)</span><strong id="leaderboardRobustness">-</strong></li>
+              <li><span>Report timestamp</span><strong id="leaderboardTimestamp">-</strong></li>
+            </ul>
+          </article>
+
+          <article class="card result-block">
+            <h3>Dataset and Training</h3>
+            <ul class="result-list">
+              <li><span>Train images</span><strong>4,942</strong></li>
+              <li><span>Validation images</span><strong>1,235</strong></li>
+              <li><span>Total labeled images</span><strong>6,177</strong></li>
+              <li><span>Batch size</span><strong>16</strong></li>
+              <li><span>Steps per epoch</span><strong>309</strong></li>
+              <li><span>Completed epochs (1h run)</span><strong>19</strong></li>
+              <li><span>Total optimizer steps</span><strong>5,871</strong></li>
+            </ul>
+          </article>
+
+          <article class="card result-block">
+            <h3>Model Scores (Current)</h3>
+            <ul class="result-list">
+              <li><span>Source run</span><strong>runs/detect/plate_train</strong></li>
+              <li><span>Last epoch</span><strong>30</strong></li>
+              <li><span>Precision (last)</span><strong>0.97952</strong></li>
+              <li><span>Recall (last)</span><strong>0.96664</strong></li>
+              <li><span>mAP@0.50 (last)</span><strong>0.98305</strong></li>
+              <li><span>mAP@0.50:0.95 (last)</span><strong>0.70566</strong></li>
+              <li><span>Best mAP@0.50</span><strong>0.98814 (epoch 28)</strong></li>
+              <li><span>Best Precision</span><strong>0.98890 (epoch 23)</strong></li>
+              <li><span>Best Recall</span><strong>0.96664 (epoch 30)</strong></li>
+            </ul>
+          </article>
+
+          <article class="card result-block">
+            <h3>Inference Latency</h3>
+            <ul class="result-list">
+              <li><span>Mean latency</span><strong>33.78 ms</strong></li>
+              <li><span>P50 latency</span><strong>31.37 ms</strong></li>
+              <li><span>P95 latency</span><strong>51.03 ms</strong></li>
+              <li><span>P99 latency</span><strong>53.48 ms</strong></li>
+              <li><span>Estimated throughput</span><strong>~29.6 FPS</strong></li>
+            </ul>
+          </article>
+
+          <article class="card result-block">
+            <h3>Runtime and Artifacts</h3>
+            <ul class="result-list">
+              <li><span>Model architecture</span><strong>YOLO11n</strong></li>
+              <li><span>Input size</span><strong>512 x 512</strong></li>
+              <li><span>Checkpoint (best.pt)</span><strong>5.45 MB</strong></li>
+              <li><span>Vehicle model score file</span><strong>Not generated locally</strong></li>
+              <li><span>Latest inference time</span><strong id="latestInference">-</strong></li>
+              <li><span>Latest runtime device</span><strong id="latestRuntime">-</strong></li>
+              <li><span>Latest detection count</span><strong id="latestDetections">-</strong></li>
+            </ul>
+          </article>
+
+          <article class="card result-block">
+            <h3>Plate Model Details</h3>
+            <ul class="result-list">
+              <li><span>Run name</span><strong>runs/detect/plate_train</strong></li>
+              <li><span>Architecture</span><strong>YOLO11n (fine-tuned)</strong></li>
+              <li><span>Task classes</span><strong>1 (license plate)</strong></li>
+              <li><span>Training epochs</span><strong>30</strong></li>
+              <li><span>Batch size</span><strong>16</strong></li>
+              <li><span>Input size</span><strong>640 x 640</strong></li>
+              <li><span>Final Precision</span><strong>0.97952</strong></li>
+              <li><span>Final Recall</span><strong>0.96664</strong></li>
+              <li><span>Final mAP@0.50</span><strong>0.98305</strong></li>
+              <li><span>Final mAP@0.50:0.95</span><strong>0.70566</strong></li>
+              <li><span>Best mAP@0.50</span><strong>0.98814 (epoch 28)</strong></li>
+              <li><span>Best mAP@0.50:0.95</span><strong>0.70566 (epoch 30)</strong></li>
+              <li><span>Checkpoint (best.pt)</span><strong>5.22 MB</strong></li>
+            </ul>
+          </article>
+        </section>
+      </section>
+
+      <section id="aboutPage" class="page">
+        <section class="card hero">
+          <h2>About This Project</h2>
+          <p class="subtitle">This system supports vehicle detection, plate detection, and full ANPR (plate detection + OCR).</p>
+        </section>
+
+        <section class="card about-content">
+          <h3>What It Does</h3>
+          <p>
+            The application accepts an uploaded image, detects vehicles and/or number plates, and can run OCR on
+            detected plate crops to output final plate strings. It returns annotated images plus runtime metrics.
+          </p>
+
+          <h3>How It Works</h3>
+          <ol>
+            <li>User uploads an image and sets a confidence threshold.</li>
+            <li>Frontend calls one endpoint based on mode: <code>/detect/vehicle</code>, <code>/detect/plate</code>, or <code>/anpr</code>.</li>
+            <li>Backend preprocesses image and runs the selected YOLO11n detector.</li>
+            <li>ANPR mode crops detected plates and runs OCR with text normalization.</li>
+            <li>Annotated output and metrics are returned to the UI.</li>
+          </ol>
+
+          <h3>Model Metrics Explained</h3>
+          <div class="metric-glossary">
+            <article>
+              <h4>Precision</h4>
+              <p>How many predicted objects are correct. Higher precision means fewer false positives.</p>
+            </article>
+            <article>
+              <h4>Recall</h4>
+              <p>How many true objects were detected. Higher recall means fewer missed detections.</p>
+            </article>
+            <article>
+              <h4>mAP@0.50</h4>
+              <p>Detection quality at IoU threshold 0.50. It is easier to score high here than stricter settings.</p>
+            </article>
+            <article>
+              <h4>mAP@0.50:0.95</h4>
+              <p>Average AP across IoU thresholds 0.50 to 0.95. This is stricter and reflects localization robustness.</p>
+            </article>
+            <article>
+              <h4>Mean / P50 / P95 / P99 Latency</h4>
+              <p>Mean is average speed. P50 is typical latency, while P95 and P99 show tail latency under slower cases.</p>
+            </article>
+            <article>
+              <h4>FPS</h4>
+              <p>Throughput estimate from latency using FPS approximately equal to 1000 divided by latency in milliseconds.</p>
+            </article>
+          </div>
+
+          <h3>Current Scope</h3>
+          <p>
+            This is a practical ANPR perception module with separate vehicle and plate detectors plus OCR-based plate
+            reading. The interface separates live detection, results, and project documentation.
+          </p>
+        </section>
+      </section>
+    </main>
+
+    <script src="/frontend/script.js"></script>
+  </body>
+</html>

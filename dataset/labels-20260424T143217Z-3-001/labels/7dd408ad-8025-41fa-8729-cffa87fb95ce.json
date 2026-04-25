@@ -1,0 +1,23 @@
+[
+    {
+        "class_id": 1,
+        "x": 366,
+        "y": 314,
+        "width": 36,
+        "height": 33
+    },
+    {
+        "class_id": 1,
+        "x": 89,
+        "y": 423,
+        "width": 20,
+        "height": 15
+    },
+    {
+        "class_id": 1,
+        "x": 160,
+        "y": 362,
+        "width": 16,
+        "height": 15
+    }
+]

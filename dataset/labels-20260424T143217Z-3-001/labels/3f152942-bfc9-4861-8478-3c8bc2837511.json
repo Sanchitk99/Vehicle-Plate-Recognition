@@ -1,0 +1,51 @@
+[
+    {
+        "class_id": 1,
+        "x": 276,
+        "y": 284,
+        "width": 36,
+        "height": 12
+    },
+    {
+        "class_id": 1,
+        "x": 529,
+        "y": 201,
+        "width": 14,
+        "height": 12
+    },
+    {
+        "class_id": 1,
+        "x": 593,
+        "y": 207,
+        "width": 17,
+        "height": 9
+    },
+    {
+        "class_id": 1,
+        "x": 395,
+        "y": 150,
+        "width": 12,
+        "height": 9
+    },
+    {
+        "class_id": 1,
+        "x": 538,
+        "y": 138,
+        "width": 13,
+        "height": 10
+    },
+    {
+        "class_id": 1,
+        "x": 263,
+        "y": 148,
+        "width": 21,
+        "height": 9
+    },
+    {
+        "class_id": 1,
+        "x": 152,
+        "y": 132,
+        "width": 24,
+        "height": 11
+    }
+]
