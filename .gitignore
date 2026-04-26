@@ -29,3 +29,13 @@ Thumbs.db
 *.dll
 *.so
 *.dylib
+
+
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+runs/
+logs/
+*.pt
