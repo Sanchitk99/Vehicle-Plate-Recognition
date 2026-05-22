@@ -12,15 +12,13 @@ FastAPI + YOLO11n project with three modes:
 - Detection confidence sliders
 - Separate vehicle and plate models
 - ANPR mode:
-  - detects vehicles first (car/bike/bus/truck)
-  - detects plate regions inside vehicle ROI
+  - uses the configured plate detector backend (`local` YOLO checkpoint or `roboflow`)
   - expands plate ROI with padding
   - crops plates
-  - creates multiple preprocessed variants (gray, bilateral, CLAHE, threshold, sharpen)
-  - low-light enhancement + glare reduction + blur-aware sharpening
-  - runs EasyOCR with single-line + top/bottom multi-line (two-wheeler) logic
+  - runs fallback detection pass (lower conf + larger `imgsz`) when no plate is found
+  - runs PaddleOCR with multi-variant OCR fallback (`original`, `resize`, `otsu`, `adaptive`)
   - text normalization + Indian format-aware correction
-- Debug artifacts saved per request in `runs/anpr_debug/...`
+- optional debug artifacts in `runs/anpr_debug/...` (disable in production)
 - Annotated image output + timing metrics
 
 ## Project Structure
@@ -48,8 +46,8 @@ pip install -r requirements.txt
 
 Notes:
 
-- EasyOCR is the active OCR backend.
-- OCR flow uses full-plate OCR plus split top/bottom OCR to support multi-line plates.
+- PaddleOCR is the active OCR backend.
+- `/anpr` now uses the selected plate detector path passed from the API (`get_plate_detector()`), not a disconnected internal route.
 
 ## Run
 
@@ -60,6 +58,15 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 Open:
 
 - `http://localhost:8000/`
+
+## Production Profile
+
+Copy `.env.production.example` values into your deployment environment (or `.env`) for lower latency variance:
+
+- `ANPR_DEBUG=0`
+- `ANPR_SAVE_DEBUG=0`
+- `ANPR_PROFILE_LOG=0`
+- plate-detection fallback kept enabled with conservative limits
 
 ## API Endpoints
 
@@ -119,7 +126,7 @@ Response:
     "total_ms": 67.8
   },
   "device": "cuda:0",
-  "ocr_backend": "easyocr",
+  "ocr_backend": "paddleocr",
   "ocr_available": true,
   "debug_dir": "D:/Project/ANPR/runs/anpr_debug/...",
   "warnings": [],

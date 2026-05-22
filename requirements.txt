@@ -6,4 +6,6 @@ opencv-python>=4.10.0
 torch>=2.2.0
 torchvision>=0.17.0
 numpy>=1.26.0
-easyocr>=1.7.1
+paddleocr>=2.7.0
+paddlepaddle>=2.6.0
+inference-sdk>=0.12.0

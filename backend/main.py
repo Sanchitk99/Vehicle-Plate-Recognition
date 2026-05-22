@@ -6,10 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import os
+
 from backend.anpr import run_anpr_pipeline
-from backend.model import plate_detector, vehicle_detector
+from backend.model import detect_with_fallback, get_plate_detector, plate_detector_error, vehicle_detector
 from backend.ocr import ocr_engine
 from backend.utils import draw_detections, image_to_base64_jpeg, read_image_from_bytes
+
+PLATE_FALLBACK_IMGSZ = int(os.getenv("PLATE_FALLBACK_IMGSZ", "768"))
 
 app = FastAPI(title="ANPR API", version="2.0.0")
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -49,16 +53,28 @@ async def _read_upload_image(file: UploadFile) -> "object":
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _build_detection_response(detector, image_bgr, confidence: float, mode: str) -> Dict:
-    detections, inference_ms = detector.detect(image_bgr, conf_threshold=confidence)
+def _build_detection_response(
+    detector,
+    image_bgr,
+    confidence: float,
+    mode: str,
+    detections=None,
+    inference_ms=None,
+    warnings=None,
+) -> Dict:
+    if detections is None or inference_ms is None:
+        detections, inference_ms = detector.detect(image_bgr, conf_threshold=confidence)
     annotated = draw_detections(image_bgr.copy(), detections)
     annotated_base64 = image_to_base64_jpeg(annotated)
 
-    baseline_text = (
-        "Vehicle model uses pretrained YOLO11n (COCO classes car/bike/bus/truck)."
-        if mode == "vehicle"
-        else "Plate model uses your fine-tuned YOLO11n checkpoint."
-    )
+    if mode == "vehicle":
+        baseline_text = "Vehicle model uses pretrained YOLO11n (COCO classes car/bike/bus/truck)."
+    else:
+        plate_backend = getattr(detector, "backend_name", "yolo")
+        if plate_backend == "roboflow":
+            baseline_text = "Plate model uses Roboflow hosted inference."
+        else:
+            baseline_text = "Plate model uses a repo-trained checkpoint (no pretrained weights)."
 
     return {
         "mode": mode,
@@ -69,18 +85,33 @@ def _build_detection_response(detector, image_bgr, confidence: float, mode: str)
         "device": detector.device,
         "baseline_map": baseline_text,
         "annotated_image": annotated_base64,
+        "warnings": warnings or [],
     }
 
 
 @app.get("/health")
 async def health_check() -> Dict:
+    plate_info: Dict[str, str] = {"weights": "unavailable", "model_size": "-", "backend": "unknown"}
+    if plate_detector_error:
+        plate_info["error"] = plate_detector_error
+    else:
+        try:
+            plate = get_plate_detector()
+            plate_info = {
+                "weights": plate.weights_name,
+                "model_size": plate.model_size_text,
+                "backend": getattr(plate, "backend_name", "yolo"),
+            }
+        except RuntimeError as exc:
+            plate_info = {"weights": "unavailable", "model_size": "-", "backend": "unknown", "error": str(exc)}
+
     return {
         "status": "ok",
         "device": vehicle_detector.device,
         "ocr_backend": ocr_engine.backend_name,
         "models": {
             "vehicle": {"weights": vehicle_detector.weights_name, "model_size": vehicle_detector.model_size_text},
-            "plate": {"weights": plate_detector.weights_name, "model_size": plate_detector.model_size_text},
+            "plate": plate_info,
         },
     }
 
@@ -111,7 +142,30 @@ async def detect_vehicle(file: UploadFile = File(...), confidence: float = Form(
 async def detect_plate(file: UploadFile = File(...), confidence: float = Form(0.25)) -> Dict:
     _validate_threshold("confidence", confidence)
     image_bgr = await _read_upload_image(file)
-    return _build_detection_response(plate_detector, image_bgr, confidence, mode="plate")
+    try:
+        plate_detector = get_plate_detector()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    detections, inference_ms, used_fallback = detect_with_fallback(
+        plate_detector,
+        image_bgr,
+        conf_threshold=confidence,
+        fallback_imgsz=PLATE_FALLBACK_IMGSZ,
+    )
+    warnings = []
+    if used_fallback:
+        warnings.append("Fallback pass used for plate detection.")
+    if not detections:
+        warnings.append("No plates detected.")
+    return _build_detection_response(
+        plate_detector,
+        image_bgr,
+        confidence,
+        mode="plate",
+        detections=detections,
+        inference_ms=inference_ms,
+        warnings=warnings,
+    )
 
 
 @app.post("/anpr")
@@ -123,6 +177,10 @@ async def run_anpr(
     _validate_threshold("det_confidence", det_confidence)
     _validate_threshold("ocr_confidence", ocr_confidence)
     image_bgr = await _read_upload_image(file)
+    try:
+        plate_detector = get_plate_detector()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return run_anpr_pipeline(
         image_bgr=image_bgr,
         vehicle_detector=vehicle_detector,

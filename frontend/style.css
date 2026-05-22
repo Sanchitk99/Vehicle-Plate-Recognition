@@ -231,13 +231,45 @@ body {
   margin-top: 0;
 }
 
-img {
+.image-frame {
+  position: relative;
   width: 100%;
-  min-height: 220px;
+  min-height: 260px;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(14, 165, 164, 0.08), transparent 45%),
+    linear-gradient(180deg, #f9fdff 0%, #eef7fb 100%);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.image-frame::before {
+  content: attr(data-empty);
+  color: var(--muted);
+  font-size: 0.95rem;
+  text-align: center;
+  padding: 16px;
+}
+
+.image-frame img {
+  display: none;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: #f8fcff;
+}
+
+.image-frame.has-image {
+  border-style: solid;
+}
+
+.image-frame.has-image::before {
+  content: "";
+}
+
+.image-frame.has-image img {
+  display: block;
 }
 
 .metrics {

@@ -199,6 +199,34 @@ def parse_optional_bbox(row: Dict[str, str]) -> Optional[Tuple[int, int, int, in
         return None
 
 
+def read_ocr_candidates(variants: Dict[str, np.ndarray]) -> List[Dict]:
+    """Read OCR outputs across variants with backward-compatible engine handling."""
+    if not ocr_engine.available:
+        return []
+
+    read_candidates_fn = getattr(ocr_engine, "read_candidates", None)
+    if callable(read_candidates_fn):
+        try:
+            return read_candidates_fn(variants)
+        except Exception:
+            pass
+
+    candidates: List[Dict] = []
+    for variant_name, variant_image in variants.items():
+        raw_text, confidence = ocr_engine.read_text(variant_image)
+        if not raw_text:
+            continue
+        candidates.append(
+            {
+                "raw_text": raw_text,
+                "confidence": float(confidence),
+                "method_used": ocr_engine.backend_name,
+                "variant": variant_name,
+            }
+        )
+    return candidates
+
+
 def run_ocr_for_image(detector: YoloDetector, image_bgr: np.ndarray, conf: float, bbox: Optional[Tuple[int, int, int, int]]) -> str:
     if bbox is not None:
         x1, y1, x2, y2 = bbox
@@ -218,7 +246,7 @@ def run_ocr_for_image(detector: YoloDetector, image_bgr: np.ndarray, conf: float
         return ""
 
     variants = build_plate_variants(roi, scale=3.0)
-    candidates = ocr_engine.read_candidates(variants)
+    candidates = read_ocr_candidates(variants)
     best = select_best_plate_candidate(candidates, min_confidence=0.2)
     return str(best.get("cleaned_text", ""))
 
@@ -309,7 +337,7 @@ def evaluate_ocr_proxy(plate_detector: YoloDetector, sample_images: List[Path], 
             continue
 
         variants = build_plate_variants(roi, scale=3.0)
-        candidates = ocr_engine.read_candidates(variants) if ocr_engine.available else []
+        candidates = read_ocr_candidates(variants)
         best = select_best_plate_candidate(candidates, min_confidence=0.2)
         text = normalize_plate_text(str(best.get("cleaned_text", "")))
         conf_score = float(best.get("confidence", 0.0))

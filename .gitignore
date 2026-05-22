@@ -17,6 +17,9 @@ __pycache__/
 runs/
 logs/
 
+# Local env vars
+.env
+
 # OS files
 .DS_Store
 Thumbs.db

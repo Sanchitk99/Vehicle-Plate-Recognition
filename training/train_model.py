@@ -25,7 +25,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation split ratio if auto-splitting.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for split.")
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold for inference test.")
-    parser.add_argument("--model", type=str, default="yolov11n.pt", help="Base pretrained checkpoint name/path.")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="yolo11n.yaml",
+        help="Model config (.yaml) or checkpoint (.pt).",
+    )
+    parser.add_argument(
+        "--pretrained",
+        action="store_true",
+        help="Use pretrained weights (only if model is a .pt checkpoint).",
+    )
+    parser.add_argument(
+        "--no-pretrained",
+        dest="pretrained",
+        action="store_false",
+        help="Train from scratch without pretrained weights.",
+    )
+    parser.set_defaults(pretrained=False)
     return parser.parse_args()
 
 
@@ -166,12 +183,6 @@ def resolve_model_weights(root: Path, model_arg: str) -> str:
     requested = Path(model_arg)
     if requested.exists():
         return str(requested)
-
-    local_yolo11n = root / "yolo11n.pt"
-    if model_arg == "yolov11n.pt" and local_yolo11n.exists():
-        print(f"[INFO] '{model_arg}' not found locally. Using '{local_yolo11n.name}'.")
-        return str(local_yolo11n)
-
     return model_arg
 
 
@@ -247,6 +258,13 @@ def main() -> None:
 
     model_weights = resolve_model_weights(root, args.model)
     print(f"base model: {model_weights}")
+    print(f"pretrained: {args.pretrained}")
+
+    if not args.pretrained and Path(model_weights).suffix.lower() == ".pt":
+        raise ValueError(
+            "Training from scratch requires a .yaml model config. "
+            "Use --model yolo11n.yaml (or another .yaml) with --no-pretrained."
+        )
 
     model = YOLO(model_weights)
     train_results = model.train(
@@ -258,7 +276,7 @@ def main() -> None:
         workers=args.workers,
         project=str(runs_dir),
         name=args.name,
-        pretrained=True,
+        pretrained=args.pretrained,
         save=True,
         exist_ok=True,
     )

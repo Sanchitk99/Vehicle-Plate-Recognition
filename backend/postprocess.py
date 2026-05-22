@@ -117,6 +117,8 @@ def select_best_plate_candidate(
         "gray": 0.04,
         "bilateral": 0.06,
         "clahe": 0.08,
+        "enhanced": 0.08,
+        "thresholded": 0.07,
         "otsu": 0.09,
         "adaptive": 0.08,
         "sharpen": 0.09,

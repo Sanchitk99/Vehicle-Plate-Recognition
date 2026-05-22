@@ -1,153 +1,182 @@
+import os
 import re
-from typing import Dict, List, Tuple
+from threading import Lock
+from typing import List, Tuple
 
 import cv2
 import numpy as np
 import torch
 
+try:
+    from paddleocr import PaddleOCR
+except Exception:
+    PaddleOCR = None
+
+ALNUM_RE = re.compile(r"[^A-Z0-9]")
+INDIAN_PATTERN = re.compile(r"^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{4}$")
+
+
+def _parse_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
 
 class OCREngine:
+    """Singleton PaddleOCR engine (initialized once)."""
+
     def __init__(self) -> None:
-        self._easy_engine = None
-        self.backends: List[str] = []
-        self._init_backends()
+        self._engine = None
+        self._init_error = ""
+        self._lock = Lock()
+
+        force_cpu = _parse_bool(os.getenv("OCR_FORCE_CPU", "0"))
+        self.use_gpu = torch.cuda.is_available() and not force_cpu
+        self.cpu_threads = int(os.getenv("OCR_CPU_THREADS", "2"))
+        self._init_engine()
+
+    def _build_engine(self, use_gpu: bool):
+        return PaddleOCR(
+            use_angle_cls=True,
+            lang="en",
+            show_log=False,
+            use_gpu=use_gpu,
+            cpu_threads=self.cpu_threads,
+        )
+
+    def _init_engine(self) -> None:
+        if PaddleOCR is None:
+            self._init_error = "paddleocr import failed"
+            return
+
+        try:
+            self._engine = self._build_engine(use_gpu=self.use_gpu)
+            return
+        except Exception as exc:
+            self._init_error = str(exc)
+
+        if self.use_gpu:
+            try:
+                self._engine = self._build_engine(use_gpu=False)
+                self.use_gpu = False
+                self._init_error = ""
+                print("[OCR] GPU init failed; using CPU fallback.")
+                return
+            except Exception as exc:
+                self._init_error = str(exc)
+                self._engine = None
 
     @property
     def available(self) -> bool:
-        return len(self.backends) > 0
+        return self._engine is not None
 
     @property
     def backend_name(self) -> str:
-        if not self.backends:
-            return "none"
-        return "+".join(self.backends)
+        return "paddleocr" if self.available else "none"
 
-    def _init_backends(self) -> None:
-        try:
-            import easyocr
+    @property
+    def init_error(self) -> str:
+        return self._init_error
 
-            self._easy_engine = easyocr.Reader(["en"], gpu=torch.cuda.is_available(), verbose=False)
-            self.backends.append("easyocr")
-        except Exception:
-            self._easy_engine = None
+    @staticmethod
+    def clean_text(text: str) -> str:
+        return ALNUM_RE.sub("", text.upper())
 
-    def _ensure_bgr(self, image: np.ndarray) -> np.ndarray:
-        if image.ndim == 2:
-            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        return image
+    @staticmethod
+    def _force_char(ch: str, expects_letter: bool) -> str:
+        letter_map = {"0": "O", "1": "I", "2": "Z", "5": "S", "8": "B"}
+        digit_map = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8"}
 
-    def preprocess_plate(self, plate: np.ndarray) -> np.ndarray:
-        plate_bgr = self._ensure_bgr(plate)
-        gray = cv2.cvtColor(plate_bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
+        if expects_letter:
+            if ch.isalpha():
+                return ch
+            return letter_map.get(ch, ch)
 
-        blur = cv2.bilateralFilter(gray, 11, 17, 17)
-        thresh = cv2.adaptiveThreshold(
-            blur,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            11,
-            2,
-        )
-        thresh = cv2.resize(thresh, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        return thresh
+        if ch.isdigit():
+            return ch
+        return digit_map.get(ch, ch)
 
-    def clean_text(self, text: str) -> str:
-        cleaned = re.sub(r"[^A-Z0-9]", "", text.upper())
-        cleaned = cleaned.replace("O", "0")
-        cleaned = cleaned.replace("I", "1")
-        cleaned = cleaned.replace("S", "5")
-        cleaned = cleaned.replace("B", "8")
-        return cleaned
+    def correct_indian_plate(self, cleaned_text: str) -> str:
+        if not cleaned_text:
+            return ""
+        if INDIAN_PATTERN.fullmatch(cleaned_text):
+            return cleaned_text
 
-    def ocr_single_pass(self, image: np.ndarray) -> Tuple[str, float]:
-        if self._easy_engine is None:
-            return "", 0.0
+        templates = ["LLDDLDDDD", "LLDDLLDDDD"]
+        best = ""
+        best_cost = 10**9
 
-        results = self._easy_engine.readtext(
-            image,
-            detail=1,
-            paragraph=False,
-            allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        )
-        if not results:
-            return "", 0.0
-
-        best = max(results, key=lambda row: float(row[2]) if len(row) >= 3 else 0.0)
-        if len(best) < 3:
-            return "", 0.0
-        return str(best[1]), float(best[2])
-
-    def ocr_multiline_plate(self, plate: np.ndarray) -> Tuple[str, float]:
-        if plate.size == 0:
-            return "", 0.0
-
-        h, _ = plate.shape[:2]
-
-        full_proc = self.preprocess_plate(plate)
-        full_text, full_conf = self.ocr_single_pass(full_proc)
-
-        top_half = plate[0 : int(h / 2), :]
-        bottom_half = plate[int(h / 2) : h, :]
-
-        top_proc = self.preprocess_plate(top_half)
-        bottom_proc = self.preprocess_plate(bottom_half)
-
-        top_text, top_conf = self.ocr_single_pass(top_proc)
-        bottom_text, bottom_conf = self.ocr_single_pass(bottom_proc)
-
-        full_text = self.clean_text(full_text)
-        top_text = self.clean_text(top_text)
-        bottom_text = self.clean_text(bottom_text)
-
-        combined_text = top_text + bottom_text
-
-        if len(combined_text) >= 8:
-            final_text = combined_text
-            confidence = (top_conf + bottom_conf) / 2.0
-        elif len(full_text) >= len(combined_text):
-            final_text = full_text
-            confidence = full_conf
-        else:
-            final_text = combined_text
-            confidence = (top_conf + bottom_conf) / 2.0
-
-        return final_text, float(confidence)
-
-    def run_ocr_on_plate(self, plate_img: np.ndarray) -> Dict:
-        text, conf = self.ocr_multiline_plate(plate_img)
-        return {
-            "plate_text": text,
-            "confidence": float(conf),
-            "method": "multi-line OCR",
-        }
-
-    def read_candidates(self, variants: Dict[str, np.ndarray], min_text_len: int = 4) -> List[Dict]:
-        if not self.available:
-            return []
-
-        candidates: List[Dict] = []
-        for variant_name, image in variants.items():
-            result = self.run_ocr_on_plate(image)
-            raw_text = str(result.get("plate_text", "")).strip()
-            if len(raw_text) < min_text_len:
+        for template in templates:
+            span = len(template)
+            if len(cleaned_text) < span:
                 continue
-            candidates.append(
-                {
-                    "raw_text": raw_text,
-                    "confidence": float(result.get("confidence", 0.0)),
-                    "method_used": "easyocr_multi_line",
-                    "variant": variant_name,
-                }
-            )
 
-        dedup: Dict[str, Dict] = {}
-        for cand in candidates:
-            key = f"{cand['method_used']}::{cand['variant']}::{cand['raw_text']}"
-            if key not in dedup or float(cand["confidence"]) > float(dedup[key]["confidence"]):
-                dedup[key] = cand
-        return list(dedup.values())
+            for i in range(0, len(cleaned_text) - span + 1):
+                sample = cleaned_text[i : i + span]
+                fixed = []
+                cost = 0
+
+                for ch, token in zip(sample, template):
+                    expects_letter = token == "L"
+                    forced = self._force_char(ch, expects_letter)
+                    if forced != ch:
+                        cost += 1
+                    fixed.append(forced)
+
+                candidate = "".join(fixed)
+                if INDIAN_PATTERN.fullmatch(candidate) and cost < best_cost:
+                    best = candidate
+                    best_cost = cost
+
+        return best if best else cleaned_text
+
+    def read_text(self, plate_image: np.ndarray) -> Tuple[str, float]:
+        if self._engine is None or plate_image.size == 0:
+            return "", 0.0
+
+        if plate_image.ndim == 2:
+            plate_image = cv2.cvtColor(plate_image, cv2.COLOR_GRAY2BGR)
+
+        with self._lock:
+            result = self._engine.ocr(plate_image, cls=True)
+
+        if not result:
+            return "", 0.0
+
+        lines = result[0] if isinstance(result[0], list) else result
+        if not lines:
+            return "", 0.0
+
+        rows: List[Tuple[float, str, float]] = []
+        for line in lines:
+            if not isinstance(line, (list, tuple)) or len(line) < 2:
+                continue
+
+            box = line[0]
+            text_conf = line[1]
+            if not text_conf or len(text_conf) < 2:
+                continue
+
+            text = str(text_conf[0]).strip()
+            conf = float(text_conf[1])
+            if not text:
+                continue
+
+            y_center = 0.0
+            x_center = 0.0
+            try:
+                y_center = sum(float(p[1]) for p in box) / len(box)
+                x_center = sum(float(p[0]) for p in box) / len(box)
+            except Exception:
+                pass
+
+            rows.append((y_center * 10000.0 + x_center, text, conf))
+
+        if not rows:
+            return "", 0.0
+
+        rows.sort(key=lambda x: x[0])
+        raw = "".join(text for _, text, _ in rows)
+        mean_conf = float(sum(conf for _, _, conf in rows) / len(rows))
+        return raw, mean_conf
 
 
 ocr_engine = OCREngine()

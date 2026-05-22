@@ -44,6 +44,23 @@ const anprOcrTime = document.getElementById("anprOcrTime");
 const anprTotalTime = document.getElementById("anprTotalTime");
 const ocrBackend = document.getElementById("ocrBackend");
 
+const setFrameState = (img, hasImage) => {
+  const frame = img?.parentElement;
+  if (!frame) return;
+  frame.classList.toggle("has-image", Boolean(hasImage));
+};
+
+const setImageSrc = (img, src) => {
+  if (!img) return;
+  if (src) {
+    img.src = src;
+    setFrameState(img, true);
+  } else {
+    img.removeAttribute("src");
+    setFrameState(img, false);
+  }
+};
+
 let selectedMode = "vehicle";
 
 const modeUi = {
@@ -177,8 +194,8 @@ imageInput.addEventListener("change", () => {
   if (!file) return;
 
   const url = URL.createObjectURL(file);
-  previewImage.src = url;
-  annotatedImage.removeAttribute("src");
+  setImageSrc(previewImage, url);
+  setImageSrc(annotatedImage, "");
   detectionList.innerHTML = "";
 
   inferenceTime.textContent = "-";
@@ -192,6 +209,9 @@ imageInput.addEventListener("change", () => {
 
   setStatus(modeUi[selectedMode].readyText);
 });
+
+previewImage.addEventListener("error", () => setFrameState(previewImage, false));
+annotatedImage.addEventListener("error", () => setFrameState(annotatedImage, false));
 
 const renderClassicDetections = (detections) => {
   if (!detections || detections.length === 0) {
@@ -304,7 +324,7 @@ detectBtn.addEventListener("click", async () => {
       throw new Error(data.detail || "Request failed.");
     }
 
-    annotatedImage.src = data.annotated_image;
+    setImageSrc(annotatedImage, data.annotated_image);
     modelSize.textContent = data.model_size || "-";
     runtimeDevice.textContent = data.device || "-";
     baselineMap.textContent = data.baseline_map || "";
