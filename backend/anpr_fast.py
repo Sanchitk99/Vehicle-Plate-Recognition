@@ -49,12 +49,19 @@ PLATE_FALLBACK_CONF_FACTOR = float(os.getenv("ANPR_PLATE_FALLBACK_CONF_FACTOR", 
 PLATE_FALLBACK_MIN_CONF = float(os.getenv("ANPR_PLATE_FALLBACK_MIN_CONF", "0.10"))
 PLATE_FALLBACK_AUGMENT = _parse_bool(os.getenv("ANPR_PLATE_FALLBACK_AUGMENT", "1"))
 PLATE_FALLBACK_MAX_DET = max(1, int(os.getenv("ANPR_PLATE_FALLBACK_MAX_DET", "100")))
+OCR_VARIANT_MAX = max(1, int(os.getenv("ANPR_OCR_VARIANT_MAX", "5")))
 
 
 @dataclass
 class PendingJob:
     frame_id: int
     future: Future
+
+
+@dataclass
+class OCRThresholds:
+    high: float
+    low: float
 
 
 class OptimizedANPR:
@@ -89,7 +96,6 @@ class OptimizedANPR:
         self._ocr_pool = ThreadPoolExecutor(max_workers=1)
         self._state_lock = Lock()
         self._yolo_lock = Lock()
-        self._detector_lock = Lock()
 
         self._frame_id = 0
         self._last_detections: List[Dict] = []
@@ -105,8 +111,6 @@ class OptimizedANPR:
         self._lock_remaining = 0
         self._challenger_plate = ""
         self._challenger_count = 0
-        self._external_plate_detector = None
-        self._external_detector_strict = False
 
         self.debug_root = Path(__file__).resolve().parents[1] / "runs" / "anpr_debug"
         self._warmup_model()
@@ -213,16 +217,16 @@ class OptimizedANPR:
             ("adaptive", adaptive),
         ]
 
-    def _run_ocr_fallback(self, crop_bgr: np.ndarray) -> Tuple[str, str, float, str]:
+    def _run_ocr_fallback(self, crop_bgr: np.ndarray, ocr_high: float, max_variants: int) -> Tuple[str, str, float, str]:
         best_raw = ""
         best_text = ""
         best_conf = 0.0
         best_variant = ""
 
-        for variant_name, variant_img in self._ocr_variants(crop_bgr):
+        for variant_name, variant_img in self._ocr_variants(crop_bgr)[:max_variants]:
             raw_text, conf = ocr_engine.read_text(variant_img)
             corrected, is_valid = self._correct_text(raw_text)
-            if is_valid and conf >= OCR_CONF:
+            if is_valid and conf >= ocr_high:
                 return raw_text, corrected, float(conf), variant_name
 
             if conf > best_conf:
@@ -241,26 +245,29 @@ class OptimizedANPR:
     def _clean_text(text: str) -> str:
         return re.sub(r"[^A-Z0-9]", "", text.upper())
 
-    def configure_plate_detector(self, detector=None, strict: bool = False) -> None:
-        """Use a provided detector for plate detection (local YOLO or Roboflow)."""
-        with self._detector_lock:
-            self._external_plate_detector = detector
-            self._external_detector_strict = bool(strict)
-
     def _correct_text(self, raw_text: str) -> Tuple[str, bool]:
         cleaned = self._clean_text(raw_text)
         corrected = ocr_engine.correct_indian_plate(cleaned)
         return corrected, bool(INDIAN_PLATE_RE.fullmatch(corrected))
 
     @staticmethod
-    def _accept_ocr_text(corrected: str, match: bool, conf: float) -> Tuple[str, bool]:
-        high = max(OCR_CONF, OCR_CONF_LOW)
-        low = min(OCR_CONF, OCR_CONF_LOW)
-        if conf >= high:
+    def _accept_ocr_text(corrected: str, match: bool, conf: float, thresholds: OCRThresholds) -> Tuple[str, bool]:
+        if conf >= thresholds.high:
             return corrected, bool(match)
-        if conf >= low:
+        if conf >= thresholds.low:
             return corrected, False
         return "", False
+
+    @staticmethod
+    def _build_thresholds(ocr_confidence: Optional[float]) -> OCRThresholds:
+        high = float(OCR_CONF)
+        low = float(OCR_CONF_LOW)
+        if ocr_confidence is not None:
+            clamped = max(0.0, min(1.0, float(ocr_confidence)))
+            high = clamped
+            # Keep "low" band slightly below high for uncertain reads.
+            low = max(0.0, min(clamped, clamped - 0.10))
+        return OCRThresholds(high=max(high, low), low=min(high, low))
 
     def _history_vote(self, plate: str) -> Tuple[str, float]:
         token = plate if plate else "__none__"
@@ -328,10 +335,13 @@ class OptimizedANPR:
 
         return "", 0.0, bbox, stabilized, False, "searching"
 
-    def _detect(self, frame_bgr: np.ndarray, conf: float) -> Tuple[List[Dict], float]:
-        with self._detector_lock:
-            external_detector = self._external_plate_detector
-            external_strict = self._external_detector_strict
+    def _detect(
+        self,
+        frame_bgr: np.ndarray,
+        conf: float,
+        external_detector=None,
+        external_strict: bool = False,
+    ) -> Tuple[List[Dict], float]:
         if external_detector is not None:
             try:
                 detections, det_ms = external_detector.detect(frame_bgr, conf_threshold=conf)
@@ -413,6 +423,7 @@ class OptimizedANPR:
         detections: List[Dict],
         det_ms: float,
         reused_boxes: bool,
+        thresholds: OCRThresholds,
     ) -> Dict:
         ocr_t0 = time.perf_counter()
         h, w = frame_bgr.shape[:2]
@@ -449,15 +460,24 @@ class OptimizedANPR:
                 # Pass 1: fast single-pass on default preprocessing.
                 raw_text, ocr_conf = ocr_engine.read_text(prep)
                 corrected, match = self._correct_text(raw_text)
-                final_text, format_valid = self._accept_ocr_text(corrected, match, float(ocr_conf))
+                final_text, format_valid = self._accept_ocr_text(corrected, match, float(ocr_conf), thresholds)
                 variant_used = "default_otsu"
 
                 # Pass 2: multi-pass fallback when low confidence or invalid format.
-                if (not final_text) or (ocr_conf < max(OCR_CONF, OCR_CONF_LOW)):
-                    fb_raw, fb_text, fb_conf, fb_variant = self._run_ocr_fallback(crop)
+                if (not final_text) or (ocr_conf < thresholds.high):
+                    fb_raw, fb_text, fb_conf, fb_variant = self._run_ocr_fallback(
+                        crop,
+                        ocr_high=thresholds.high,
+                        max_variants=OCR_VARIANT_MAX,
+                    )
                     if fb_text:
                         fb_match = bool(INDIAN_PLATE_RE.fullmatch(fb_text))
-                        fb_final_text, fb_format_valid = self._accept_ocr_text(fb_text, fb_match, float(fb_conf))
+                        fb_final_text, fb_format_valid = self._accept_ocr_text(
+                            fb_text,
+                            fb_match,
+                            float(fb_conf),
+                            thresholds,
+                        )
                         # Regex adds a bonus, but never acts as a hard reject.
                         base_score = float(ocr_conf) + (0.05 if bool(match) else 0.0)
                         fb_score = float(fb_conf) + (0.05 if fb_match else 0.0)
@@ -585,9 +605,15 @@ class OptimizedANPR:
             "warnings": ["Pipeline warm-up: no OCR output yet."],
         }
 
-    def process_frame(self, frame_bgr: np.ndarray, det_confidence: float = DET_CONF) -> Dict:
+    def process_frame(
+        self,
+        frame_bgr: np.ndarray,
+        det_confidence: float = DET_CONF,
+        ocr_confidence: Optional[float] = None,
+    ) -> Dict:
         """Streaming call with frame N detection and frame N-1 OCR overlap."""
 
+        thresholds = self._build_thresholds(ocr_confidence)
         with self._state_lock:
             self._frame_id += 1
             frame_id = self._frame_id
@@ -628,6 +654,7 @@ class OptimizedANPR:
                     detections,
                     det_ms,
                     reused,
+                    thresholds,
                 ),
             )
 
@@ -635,22 +662,74 @@ class OptimizedANPR:
                 return completed
             return self._make_empty_result(frame_id)
 
-    def process_frame_sync(self, frame_bgr: np.ndarray, det_confidence: float = DET_CONF) -> Dict:
+    def process_frame_sync(
+        self,
+        frame_bgr: np.ndarray,
+        det_confidence: float = DET_CONF,
+        ocr_confidence: Optional[float] = None,
+        external_detector=None,
+        external_strict: bool = False,
+        stateless: bool = False,
+    ) -> Dict:
         """Single-image path: fully synchronous and deterministic."""
 
+        thresholds = self._build_thresholds(ocr_confidence)
         with self._state_lock:
             self._frame_id += 1
             frame_id = self._frame_id
-
-        detections, det_ms = self._detect(frame_bgr, det_confidence)
-        if ENABLE_SIMPLE_TRACKING and not detections and self._last_valid_bbox:
-            detections = [
-                {
-                    "bbox": list(self._last_valid_bbox),
-                    "det_confidence": max(0.30, float(self._last_valid_conf)),
+            state_backup = None
+            if stateless:
+                state_backup = {
+                    "last_plate_cache": dict(self._last_plate_cache),
+                    "plate_history": list(self._plate_history),
+                    "last_valid_plate": self._last_valid_plate,
+                    "last_valid_conf": self._last_valid_conf,
+                    "last_valid_bbox": list(self._last_valid_bbox),
+                    "stable_plate": self._stable_plate,
+                    "stable_count": self._stable_count,
+                    "lock_remaining": self._lock_remaining,
+                    "challenger_plate": self._challenger_plate,
+                    "challenger_count": self._challenger_count,
                 }
-            ]
-        return self._ocr_task(frame_id, frame_bgr, detections, det_ms, reused_boxes=False)
+                self._last_plate_cache = {"bbox": [], "plate": "", "confidence": 0.0, "raw_ocr": "", "corrected_ocr": ""}
+                self._plate_history.clear()
+                self._last_valid_plate = ""
+                self._last_valid_conf = 0.0
+                self._last_valid_bbox = []
+                self._stable_plate = ""
+                self._stable_count = 0
+                self._lock_remaining = 0
+                self._challenger_plate = ""
+                self._challenger_count = 0
+
+            try:
+                detections, det_ms = self._detect(
+                    frame_bgr,
+                    det_confidence,
+                    external_detector=external_detector,
+                    external_strict=external_strict,
+                )
+                if ENABLE_SIMPLE_TRACKING and not detections and self._last_valid_bbox and not stateless:
+                    detections = [
+                        {
+                            "bbox": list(self._last_valid_bbox),
+                            "det_confidence": max(0.30, float(self._last_valid_conf)),
+                        }
+                    ]
+                return self._ocr_task(frame_id, frame_bgr, detections, det_ms, reused_boxes=False, thresholds=thresholds)
+            finally:
+                if state_backup is not None:
+                    self._last_plate_cache = state_backup["last_plate_cache"]
+                    self._plate_history.clear()
+                    self._plate_history.extend(state_backup["plate_history"])
+                    self._last_valid_plate = state_backup["last_valid_plate"]
+                    self._last_valid_conf = state_backup["last_valid_conf"]
+                    self._last_valid_bbox = state_backup["last_valid_bbox"]
+                    self._stable_plate = state_backup["stable_plate"]
+                    self._stable_count = state_backup["stable_count"]
+                    self._lock_remaining = state_backup["lock_remaining"]
+                    self._challenger_plate = state_backup["challenger_plate"]
+                    self._challenger_count = state_backup["challenger_count"]
 
     def flush_pending(self) -> Optional[Dict]:
         """Return the latest pending OCR result if any (for stream end flush)."""
@@ -677,12 +756,14 @@ def run_anpr_pipeline(
     ocr_confidence: float = OCR_CONF,
     plate_detector=None,
 ) -> Dict:
-    del ocr_confidence
-    _pipeline.configure_plate_detector(plate_detector, strict=plate_detector is not None)
-    try:
-        result = _pipeline.process_frame_sync(image_bgr, det_confidence=det_confidence)
-    finally:
-        _pipeline.configure_plate_detector(None, strict=False)
+    result = _pipeline.process_frame_sync(
+        image_bgr,
+        det_confidence=det_confidence,
+        ocr_confidence=ocr_confidence,
+        external_detector=plate_detector,
+        external_strict=plate_detector is not None,
+        stateless=True,
+    )
 
     # Compatibility keys used by existing API/frontend.
     annotated = image_bgr.copy()

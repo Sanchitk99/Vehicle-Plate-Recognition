@@ -251,6 +251,16 @@ def run_ocr_for_image(detector: YoloDetector, image_bgr: np.ndarray, conf: float
     return str(best.get("cleaned_text", ""))
 
 
+def resolve_gt_image_path(rel_or_abs: str) -> Path:
+    image_path = Path(rel_or_abs)
+    if image_path.is_absolute():
+        return image_path
+    root_path = ROOT / image_path
+    if root_path.exists():
+        return root_path
+    return Path.cwd() / image_path
+
+
 def evaluate_ocr_accuracy(plate_detector: YoloDetector, ocr_gt_csv: Path, conf: float) -> Dict[str, float | int | str]:
     rows = read_csv_rows(ocr_gt_csv)
     if not rows:
@@ -271,9 +281,7 @@ def evaluate_ocr_accuracy(plate_detector: YoloDetector, ocr_gt_csv: Path, conf: 
         if not rel_image or not target:
             continue
 
-        image_path = Path(rel_image)
-        if not image_path.is_absolute():
-            image_path = Path.cwd() / image_path
+        image_path = resolve_gt_image_path(rel_image)
         if not image_path.exists():
             continue
 

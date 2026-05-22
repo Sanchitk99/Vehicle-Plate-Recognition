@@ -17,6 +17,8 @@ FastAPI + YOLO11n project with three modes:
   - crops plates
   - runs fallback detection pass (lower conf + larger `imgsz`) when no plate is found
   - runs PaddleOCR with multi-variant OCR fallback (`original`, `resize`, `otsu`, `adaptive`)
+  - honors request-level `ocr_confidence` threshold in `/anpr`
+  - uses stateless single-image inference to avoid cross-request plate-memory leakage
   - text normalization + Indian format-aware correction
 - optional debug artifacts in `runs/anpr_debug/...` (disable in production)
 - Annotated image output + timing metrics
