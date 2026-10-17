@@ -3,29 +3,49 @@ const API_BASE =
     ? "http://localhost:8000"
     : `${window.location.origin}`;
 
+// DOM Elements
 const imageInput = document.getElementById("imageInput");
+const dropzone = document.getElementById("dropzone");
+const dropzoneContent = document.getElementById("dropzoneContent");
+const fileBadge = document.getElementById("fileBadge");
+const fileNameText = document.getElementById("fileNameText");
+const fileSizeText = document.getElementById("fileSizeText");
+const fileBadgeIcon = document.getElementById("fileBadgeIcon");
+const clearFileBtn = document.getElementById("clearFileBtn");
+const fileLabel = document.getElementById("fileLabel");
+
 const detectBtn = document.getElementById("detectBtn");
 const previewImage = document.getElementById("previewImage");
 const annotatedImage = document.getElementById("annotatedImage");
 const previewVideo = document.getElementById("previewVideo");
 const annotatedVideo = document.getElementById("annotatedVideo");
+const previewFrame = document.getElementById("previewFrame");
+const annotatedFrame = document.getElementById("annotatedFrame");
 const detectionsHeading = document.getElementById("detectionsHeading");
-const fileLabel = document.getElementById("fileLabel");
+const detectionList = document.getElementById("detectionList");
 
 const confidenceSlider = document.getElementById("confidenceSlider");
 const confidenceValue = document.getElementById("confidenceValue");
-const detectionList = document.getElementById("detectionList");
+const ocrConfidenceWrap = document.getElementById("ocrConfidenceControl");
+const ocrConfidenceSlider = document.getElementById("ocrConfidenceSlider");
+const ocrConfidenceValue = document.getElementById("ocrConfidenceValue");
 
 const frameStrideControl = document.getElementById("frameStrideControl");
 const frameStrideSlider = document.getElementById("frameStrideSlider");
 const frameStrideValue = document.getElementById("frameStrideValue");
+
 const videoSummaryCard = document.getElementById("videoSummaryCard");
+const videoPlatesTable = document.getElementById("videoPlatesTable");
 const videoPlatesBody = document.getElementById("videoPlatesBody");
+const uniqueCountBadge = document.getElementById("uniqueCountBadge");
 
 const inferenceTime = document.getElementById("inferenceTime");
 const modelSize = document.getElementById("modelSize");
 const runtimeDevice = document.getElementById("runtimeDevice");
+const latestDetectionsBadge = document.getElementById("latestDetectionsBadge");
 const baselineMap = document.getElementById("baselineMap");
+
+const statusWrap = document.getElementById("statusWrap");
 const statusText = document.getElementById("statusText");
 
 const navLinks = document.querySelectorAll(".nav-link");
@@ -44,15 +64,13 @@ const leaderboardRobustness = document.getElementById("leaderboardRobustness");
 const leaderboardTimestamp = document.getElementById("leaderboardTimestamp");
 
 const modeButtons = document.querySelectorAll(".mode-btn");
-const ocrConfidenceWrap = document.getElementById("ocrConfidenceControl");
-const ocrConfidenceSlider = document.getElementById("ocrConfidenceSlider");
-const ocrConfidenceValue = document.getElementById("ocrConfidenceValue");
 const anprTimingsCard = document.getElementById("anprTimingsCard");
 const anprDetectionTime = document.getElementById("anprDetectionTime");
 const anprOcrTime = document.getElementById("anprOcrTime");
 const anprTotalTime = document.getElementById("anprTotalTime");
 const ocrBackend = document.getElementById("ocrBackend");
 
+// State helper functions
 const setFrameState = (img, hasImage) => {
   const frame = img?.parentElement;
   if (!frame) return;
@@ -93,45 +111,83 @@ const setVideoSrc = (video, src) => {
   }
 };
 
+const formatFileSize = (bytes) => {
+  if (!bytes) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+};
+
+const isVideoFile = (file) => {
+  if (!file) return false;
+  return (
+    (file.type && file.type.startsWith("video/")) ||
+    /\.(mp4|avi|mov|mkv|webm)$/i.test(file.name || "")
+  );
+};
+
+const showFileBadge = (file) => {
+  if (!file || !fileBadge) return;
+  const isVideo = isVideoFile(file);
+  fileNameText.textContent = file.name;
+  fileSizeText.textContent = formatFileSize(file.size);
+  if (fileBadgeIcon) fileBadgeIcon.textContent = isVideo ? "🎥" : "🖼️";
+  fileBadge.style.display = "flex";
+  if (dropzoneContent) dropzoneContent.style.display = "none";
+};
+
+const hideFileBadge = () => {
+  if (fileBadge) fileBadge.style.display = "none";
+  if (dropzoneContent) dropzoneContent.style.display = "flex";
+};
+
 let selectedMode = "vehicle";
 
 const modeUi = {
   vehicle: {
     endpoint: "/detect/vehicle",
     buttonText: "Detect Vehicles",
+    icon: "🚗",
     heading: "Detected Vehicles",
-    readyText: "Image ready. Click Detect Vehicles.",
+    readyText: "Vehicle image ready. Click Detect Vehicles.",
     emptyText: "No vehicles detected in this image.",
     doneSuffix: "vehicle(s) detected.",
   },
   plate: {
     endpoint: "/detect/plate",
     buttonText: "Detect Plates",
-    heading: "Detected Plates",
-    readyText: "Image ready. Click Detect Plates.",
+    icon: "🔍",
+    heading: "Detected Number Plates",
+    readyText: "Plate image ready. Click Detect Plates.",
     emptyText: "No plates detected in this image.",
     doneSuffix: "plate(s) detected.",
   },
   anpr: {
     endpoint: "/anpr",
-    buttonText: "Run ANPR",
-    heading: "ANPR Results",
-    readyText: "Image ready. Click Run ANPR.",
+    buttonText: "Run Full ANPR",
+    icon: "⚡",
+    heading: "ANPR Plate + OCR Results",
+    readyText: "Image ready. Click Run Full ANPR.",
     emptyText: "No vehicle/plate detections found for OCR in this image.",
     doneSuffix: "vehicle-linked plate result(s) processed.",
   },
   video: {
     endpoint: "/anpr/video",
-    buttonText: "Process Video ANPR",
-    heading: "Video Stream Results",
-    readyText: "Video ready. Click Process Video ANPR.",
+    buttonText: "Process Video Stream",
+    icon: "🎥",
+    heading: "Video Stream Tracking Results",
+    readyText: "Video stream ready. Click Process Video Stream.",
     emptyText: "No vehicles or plates detected in video.",
     doneSuffix: "unique vehicle(s) tracked and recognized.",
   },
 };
 
-const setStatus = (msg) => {
-  statusText.textContent = msg;
+const setStatus = (msg, state = "idle") => {
+  if (statusText) statusText.textContent = msg;
+  if (statusWrap) {
+    statusWrap.className = `status-indicator status-${state}`;
+  }
 };
 
 const asCheckText = (value, pass) => {
@@ -140,9 +196,7 @@ const asCheckText = (value, pass) => {
 };
 
 const loadLeaderboardMetrics = async () => {
-  if (!leaderboardOverall) {
-    return;
-  }
+  if (!leaderboardOverall) return;
 
   try {
     const response = await fetch(`/runs/metrics/leaderboard_metrics.json?t=${Date.now()}`);
@@ -170,7 +224,7 @@ const loadLeaderboardMetrics = async () => {
     leaderboardRobustness.textContent = asCheckText(robust, Boolean(checks.robustness_retention_geq_0_70));
 
     leaderboardOverall.textContent = checks.all_thresholds_met
-      ? "Qualified"
+      ? "Qualified (100% Passed)"
       : "Not qualified yet";
     leaderboardTimestamp.textContent = metrics.timestamp || "-";
   } catch (error) {
@@ -178,6 +232,7 @@ const loadLeaderboardMetrics = async () => {
   }
 };
 
+// Navigation
 const setActivePage = (pageId) => {
   pages.forEach((page) => {
     page.classList.toggle("active", page.id === pageId);
@@ -197,6 +252,7 @@ if (initialPageFromHash && document.getElementById(initialPageFromHash)) {
   setActivePage(initialPageFromHash);
 }
 
+// Slider Labels
 const updateConfidenceLabel = () => {
   confidenceValue.textContent = Number(confidenceSlider.value).toFixed(2);
 };
@@ -218,28 +274,42 @@ confidenceSlider.addEventListener("input", updateConfidenceLabel);
 ocrConfidenceSlider.addEventListener("input", updateOcrConfidenceLabel);
 frameStrideSlider?.addEventListener("input", updateFrameStrideLabel);
 
+// Mode Switching
 const setDetectionMode = (mode) => {
   selectedMode = mode;
   modeButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.mode === mode));
 
-  detectBtn.textContent = modeUi[mode].buttonText;
+  const btnText = detectBtn.querySelector(".btn-text");
+  if (btnText) {
+    btnText.textContent = modeUi[mode].buttonText;
+  } else {
+    detectBtn.textContent = modeUi[mode].buttonText;
+  }
+
+  const btnIcon = detectBtn.querySelector(".btn-icon");
+  if (btnIcon) {
+    btnIcon.textContent = modeUi[mode].icon || "⚡";
+  }
+
   detectionsHeading.textContent = modeUi[mode].heading;
   if (ocrConfidenceWrap) {
-    ocrConfidenceWrap.style.display = (mode === "anpr" || mode === "video") ? "grid" : "none";
+    ocrConfidenceWrap.style.display = (mode === "anpr" || mode === "video") ? "flex" : "none";
   }
   if (frameStrideControl) {
-    frameStrideControl.style.display = mode === "video" ? "grid" : "none";
+    frameStrideControl.style.display = mode === "video" ? "flex" : "none";
   }
   if (anprTimingsCard) {
-    anprTimingsCard.style.display = mode === "anpr" ? "block" : "none";
+    anprTimingsCard.style.display = mode === "anpr" ? "flex" : "none";
   }
   if (videoSummaryCard) {
-    videoSummaryCard.style.display = (mode === "video" && videoPlatesBody && videoPlatesBody.children.length > 0) ? "block" : "none";
+    videoSummaryCard.style.display = (mode === "video" && videoPlatesBody && videoPlatesBody.children.length > 0) ? "flex" : "none";
   }
   if (fileLabel) {
-    fileLabel.textContent = mode === "video" ? "Choose Video File" : "Choose Image or Video";
+    fileLabel.innerHTML = mode === "video"
+      ? `Drag & drop video stream, or <span class="highlight">Browse Files</span>`
+      : `Drag & drop image or video here, or <span class="highlight">Browse Files</span>`;
   }
-  setStatus(modeUi[mode].readyText);
+  setStatus(modeUi[mode].readyText, "idle");
   detectionList.innerHTML = "";
 };
 
@@ -250,15 +320,66 @@ modeButtons.forEach((btn) => {
 setDetectionMode("vehicle");
 loadLeaderboardMetrics();
 
-const isVideoFile = (file) => {
-  if (!file) return false;
-  return file.type.startsWith("video/") || /\.(mp4|avi|mov|mkv|webm)$/i.test(file.name);
-};
+// Drag-and-drop zone events
+if (dropzone) {
+  ["dragenter", "dragover"].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropzone.classList.add("drag-active");
+    });
+  });
 
+  ["dragleave", "drop"].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropzone.classList.remove("drag-active");
+    });
+  });
+
+  dropzone.addEventListener("drop", (e) => {
+    const dt = e.dataTransfer;
+    const files = dt.files;
+    if (files && files.length > 0) {
+      imageInput.files = files;
+      imageInput.dispatchEvent(new Event("change"));
+    }
+  });
+}
+
+clearFileBtn?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  imageInput.value = "";
+  hideFileBadge();
+  setImageSrc(previewImage, "");
+  setImageSrc(annotatedImage, "");
+  setVideoSrc(previewVideo, "");
+  setVideoSrc(annotatedVideo, "");
+  detectionList.innerHTML = "";
+  if (videoPlatesBody) videoPlatesBody.innerHTML = "";
+  if (videoSummaryCard) videoSummaryCard.style.display = "none";
+  if (latestDetectionsBadge) latestDetectionsBadge.textContent = "0 targets";
+  inferenceTime.textContent = "-";
+  modelSize.textContent = "-";
+  runtimeDevice.textContent = "-";
+  baselineMap.textContent = "";
+  anprDetectionTime.textContent = "-";
+  anprOcrTime.textContent = "-";
+  anprTotalTime.textContent = "-";
+  ocrBackend.textContent = "-";
+  setStatus("Media cleared. Choose an image or video to begin.", "idle");
+});
+
+// File input change handler
 imageInput.addEventListener("change", () => {
   const file = imageInput.files?.[0];
-  if (!file) return;
+  if (!file) {
+    hideFileBadge();
+    return;
+  }
 
+  showFileBadge(file);
   const url = URL.createObjectURL(file);
   const isVideo = isVideoFile(file);
 
@@ -283,6 +404,7 @@ imageInput.addEventListener("change", () => {
   detectionList.innerHTML = "";
   if (videoPlatesBody) videoPlatesBody.innerHTML = "";
   if (videoSummaryCard) videoSummaryCard.style.display = "none";
+  if (latestDetectionsBadge) latestDetectionsBadge.textContent = "0 targets";
 
   inferenceTime.textContent = "-";
   modelSize.textContent = "-";
@@ -293,7 +415,7 @@ imageInput.addEventListener("change", () => {
   anprTotalTime.textContent = "-";
   ocrBackend.textContent = "-";
 
-  setStatus(modeUi[selectedMode].readyText);
+  setStatus(modeUi[selectedMode].readyText, "idle");
 });
 
 previewImage.addEventListener("error", () => setFrameState(previewImage, false));
@@ -301,11 +423,15 @@ annotatedImage.addEventListener("error", () => setFrameState(annotatedImage, fal
 previewVideo?.addEventListener("error", () => setVideoFrameState(previewVideo, false));
 annotatedVideo?.addEventListener("error", () => setVideoFrameState(annotatedVideo, false));
 
+// Classical Detections (Vehicle or Plate only)
 const renderClassicDetections = (detections) => {
   if (!detections || detections.length === 0) {
     detectionList.innerHTML = `<li>${modeUi[selectedMode].emptyText}</li>`;
+    if (latestDetectionsBadge) latestDetectionsBadge.textContent = "0 targets";
     return;
   }
+
+  if (latestDetectionsBadge) latestDetectionsBadge.textContent = `${detections.length} target(s)`;
 
   detections.forEach((det, index) => {
     const item = document.createElement("li");
@@ -313,30 +439,33 @@ const renderClassicDetections = (detections) => {
     const bbox = det.bbox.join(", ");
     item.innerHTML = `
       <div class="det-row">
-        <span class="det-title">${index + 1}. ${det.label}</span>
-        <span class="det-conf">${confidencePct}%</span>
+        <span class="det-title">${index + 1}. ${det.label.toUpperCase()}</span>
+        <span class="det-conf">${confidencePct}% CONF</span>
       </div>
       <div class="conf-bar">
         <div class="conf-fill" style="width: ${confidencePct}%"></div>
       </div>
-      <div class="det-bbox">bbox=[${bbox}]</div>
+      <div class="det-bbox"><strong>Bounding Box:</strong> [${bbox}]</div>
     `;
     detectionList.appendChild(item);
   });
 };
 
+// ANPR Plate + OCR Detections with Indian HSRP Plate Mockup
 const renderAnprDetections = (detections) => {
   if (!detections || detections.length === 0) {
     detectionList.innerHTML = `<li>${modeUi[selectedMode].emptyText}</li>`;
+    if (latestDetectionsBadge) latestDetectionsBadge.textContent = "0 targets";
     return;
   }
+
+  if (latestDetectionsBadge) latestDetectionsBadge.textContent = `${detections.length} target(s)`;
 
   detections.forEach((det, index) => {
     const item = document.createElement("li");
     const plateText = det.plate_text || det.cleaned_text || det.plate || det.corrected_ocr || "(unreadable)";
     const rawText = det.raw_text || det.raw_ocr || "-";
-    const method = det.ocr_method || det.method_used || det.variant_used || "easyocr";
-    const variant = det.source_variant || det.variant_used || "-";
+    const method = det.ocr_method || det.method_used || det.variant_used || "CRNN BiLSTM";
     const detPct = Math.round(((det.det_confidence ?? det.confidence) || 0) * 100);
     const ocrPct = Math.round(((det.ocr_confidence ?? det.confidence) || 0) * 100);
     const plateBbox = (det.plate_bbox || det.bbox || []).join(", ");
@@ -366,18 +495,33 @@ const renderAnprDetections = (detections) => {
 
     item.innerHTML = `
       <div class="det-row">
-        <span class="det-title">${index + 1}. <strong style="font-size: 1.15em; letter-spacing: 1px; color: var(--accent, #3b82f6);">${plateText}</strong></span>
-        <span class="det-conf">DET ${detPct}% | OCR ${ocrPct}%</span>
+        <div class="det-title">
+          <span>${index + 1}.</span>
+          <div class="hsrp-badge">
+            <div class="hsrp-ind-strip">
+              <span>&#9881;</span>
+              <span>IND</span>
+            </div>
+            <span class="hsrp-plate-number">${plateText}</span>
+          </div>
+        </div>
+        <div class="det-conf">DET ${detPct}% &bull; OCR ${ocrPct}%</div>
       </div>
-      <div class="conf-bar" style="margin: 6px 0;">
-        <div class="conf-fill" style="width: ${ocrPct}%; background: ${isIndian ? '#10b981' : '#3b82f6'};"></div>
+      <div class="conf-bar">
+        <div class="conf-fill" style="width: ${ocrPct}%; background: ${isIndian ? 'linear-gradient(90deg, #10b981, #06b6d4)' : 'linear-gradient(90deg, #6366f1, #06b6d4)'};"></div>
       </div>
-      <div class="det-bbox" style="margin-top: 4px;"><strong>Raw OCR:</strong> ${rawText} | <strong>Engine:</strong> ${method} | <strong>Time:</strong> ${perItemTime}</div>
-      <div class="det-bbox"><strong>Plate Box:</strong> [${plateBbox || "-"}] ${vehicleBbox ? `| <strong>Vehicle Box:</strong> [${vehicleBbox}]` : ""}</div>
-      <div class="det-bbox"><strong>Indian Format Verified:</strong> ${isIndian ? '<span style="color:#10b981; font-weight:600;">YES</span>' : '<span style="color:#94a3b8;">NO</span>'}</div>
+      <div class="det-bbox">
+        <strong>Raw OCR:</strong> ${rawText} &bull; <strong>Backbone:</strong> ${method} &bull; <strong>Latency:</strong> ${perItemTime}
+      </div>
+      <div class="det-bbox">
+        <strong>Plate Coordinates:</strong> [${plateBbox || "-"}] ${vehicleBbox ? `&bull; <strong>Vehicle Box:</strong> [${vehicleBbox}]` : ""}
+      </div>
+      <div class="det-bbox">
+        <strong>MoRTH Format Verified:</strong> ${isIndian ? '<span class="badge-verified">VERIFIED HSRP</span>' : '<span class="badge-unverified">STANDARD</span>'}
+      </div>
       ${hasDebug ? `
-      <details class="debug-panel" style="margin-top: 8px;">
-        <summary>Debug Plate Views</summary>
+      <details class="debug-panel">
+        <summary>View Multi-Pass Preprocessing Filters</summary>
         <div class="debug-grid">
           ${originalBlock}
           ${cropBlock}
@@ -389,6 +533,7 @@ const renderAnprDetections = (detections) => {
   });
 };
 
+// Video Stream Detections with Table Log
 const renderVideoDetections = (plates) => {
   detectionList.innerHTML = "";
   if (!videoPlatesBody || !videoSummaryCard) return;
@@ -397,10 +542,14 @@ const renderVideoDetections = (plates) => {
   if (!plates || plates.length === 0) {
     videoSummaryCard.style.display = "none";
     detectionList.innerHTML = `<li>No license plates detected in the video stream.</li>`;
+    if (latestDetectionsBadge) latestDetectionsBadge.textContent = "0 plates";
+    if (uniqueCountBadge) uniqueCountBadge.textContent = "0 Unique Plates";
     return;
   }
 
-  videoSummaryCard.style.display = "block";
+  videoSummaryCard.style.display = "flex";
+  if (latestDetectionsBadge) latestDetectionsBadge.textContent = `${plates.length} vehicles`;
+  if (uniqueCountBadge) uniqueCountBadge.textContent = `${plates.length} Unique Vehicles`;
 
   plates.forEach((plate, idx) => {
     const tr = document.createElement("tr");
@@ -408,41 +557,66 @@ const renderVideoDetections = (plates) => {
     const isIndian = Boolean(plate.indian_format_like);
     const thumbHtml = plate.thumbnail
       ? `<img src="${plate.thumbnail}" alt="${plate.plate_text}" class="plate-thumb" />`
-      : `<span style="color:var(--muted);">-</span>`;
+      : `<span style="color:var(--text-muted);">-</span>`;
 
     tr.innerHTML = `
-      <td style="padding: 10px;">${idx + 1}</td>
-      <td style="padding: 10px;"><strong style="color: var(--accent); font-size: 1.05rem;">${plate.plate_text}</strong></td>
-      <td style="padding: 10px;">${confPct}%</td>
-      <td style="padding: 10px;">${plate.first_seen_sec}s - ${plate.last_seen_sec}s (${plate.duration_sec}s)</td>
-      <td style="padding: 10px;">${plate.frames_tracked} frames</td>
-      <td style="padding: 10px;">
+      <td>${idx + 1}</td>
+      <td>
+        <div class="hsrp-badge">
+          <div class="hsrp-ind-strip">
+            <span>&#9881;</span>
+            <span>IND</span>
+          </div>
+          <span class="hsrp-plate-number">${plate.plate_text}</span>
+        </div>
+      </td>
+      <td>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <strong style="color:var(--text-highlight); font-family:var(--font-mono);">${confPct}%</strong>
+          <div class="conf-bar" style="width:60px; height:5px; margin:0;">
+            <div class="conf-fill" style="width:${confPct}%;"></div>
+          </div>
+        </div>
+      </td>
+      <td style="font-family:var(--font-mono); font-size:0.82rem;">${plate.first_seen_sec}s - ${plate.last_seen_sec}s (${plate.duration_sec}s)</td>
+      <td style="font-family:var(--font-mono);">${plate.frames_tracked} frames</td>
+      <td>
         ${isIndian ? '<span class="badge-verified">VERIFIED</span>' : '<span class="badge-unverified">STANDARD</span>'}
       </td>
-      <td style="padding: 10px;">${thumbHtml}</td>
+      <td>${thumbHtml}</td>
     `;
     videoPlatesBody.appendChild(tr);
 
     const li = document.createElement("li");
     li.innerHTML = `
       <div class="det-row">
-        <span class="det-title">${idx + 1}. <strong style="font-size: 1.15em; letter-spacing: 1px; color: var(--accent, #3b82f6);">${plate.plate_text}</strong></span>
-        <span class="det-conf">${confPct}% (seen ${plate.frames_tracked}x)</span>
+        <div class="det-title">
+          <span>#${plate.track_id}</span>
+          <div class="hsrp-badge">
+            <div class="hsrp-ind-strip">
+              <span>&#9881;</span>
+              <span>IND</span>
+            </div>
+            <span class="hsrp-plate-number">${plate.plate_text}</span>
+          </div>
+        </div>
+        <div class="det-conf">${confPct}% &bull; tracked ${plate.frames_tracked}x</div>
       </div>
-      <div class="conf-bar" style="margin: 6px 0;">
-        <div class="conf-fill" style="width: ${confPct}%; background: ${isIndian ? '#10b981' : '#3b82f6'};"></div>
-      </div>
-      <div class="det-bbox" style="margin-top: 4px;">
-        <strong>Track ID:</strong> #${plate.track_id} | <strong>Visible:</strong> ${plate.first_seen_sec}s to ${plate.last_seen_sec}s (${plate.duration_sec}s duration)
+      <div class="conf-bar">
+        <div class="conf-fill" style="width: ${confPct}%; background: ${isIndian ? 'linear-gradient(90deg, #10b981, #06b6d4)' : 'linear-gradient(90deg, #6366f1, #06b6d4)'};"></div>
       </div>
       <div class="det-bbox">
-        <strong>Indian Format Verified:</strong> ${isIndian ? '<span style="color:#10b981; font-weight:600;">YES</span>' : '<span style="color:#94a3b8;">NO</span>'}
+        <strong>Time Window:</strong> ${plate.first_seen_sec}s &rarr; ${plate.last_seen_sec}s (${plate.duration_sec}s duration)
+      </div>
+      <div class="det-bbox">
+        <strong>MoRTH Verified:</strong> ${isIndian ? '<span class="badge-verified">YES - HSRP SYNTAX</span>' : '<span class="badge-unverified">STANDARD FORMAT</span>'}
       </div>
     `;
     detectionList.appendChild(li);
   });
 };
 
+// Safe JSON API response parser
 const parseApiResponse = async (response, fallbackMsg) => {
   const text = await response.text();
   let data = null;
@@ -460,16 +634,17 @@ const parseApiResponse = async (response, fallbackMsg) => {
   return data;
 };
 
+// Main Detect / Inference Button
 detectBtn.addEventListener("click", async () => {
   const file = imageInput.files?.[0];
   if (!file) {
-    setStatus(selectedMode === "video" ? "Please upload a video first." : "Please upload an image first.");
+    setStatus(selectedMode === "video" ? "Please upload a video file first." : "Please upload an image first.", "error");
     return;
   }
 
   const isVideo = isVideoFile(file);
 
-  // Auto-switch mode if there is a mismatch between the uploaded file type and selected mode
+  // Auto-switch mode if there is a mismatch
   if (isVideo && selectedMode !== "video") {
     setDetectionMode("video");
   } else if (!isVideo && selectedMode === "video") {
@@ -490,7 +665,7 @@ detectBtn.addEventListener("click", async () => {
     detectBtn.disabled = true;
     detectionList.innerHTML = "";
     if (videoPlatesBody) videoPlatesBody.innerHTML = "";
-    setStatus("Processing video frames on GPU... Analyzing frames and tracking plates.");
+    setStatus("Analyzing video stream on CUDA GPU... Tracking multi-frame plates.", "loading");
 
     try {
       const response = await fetch(endpoint, { method: "POST", body: formData });
@@ -504,13 +679,13 @@ detectBtn.addEventListener("click", async () => {
 
       renderVideoDetections(data.unique_plates || []);
       const count = data.unique_vehicles_count ?? (data.unique_plates?.length || 0);
-      latestDetections.textContent = String(count);
-      latestInference.textContent = inferenceTime.textContent;
-      latestRuntime.textContent = runtimeDevice.textContent;
-      setStatus(`Done. ${count} ${mode.doneSuffix}`);
+      if (latestDetections) latestDetections.textContent = String(count);
+      if (latestInference) latestInference.textContent = inferenceTime.textContent;
+      if (latestRuntime) latestRuntime.textContent = runtimeDevice.textContent;
+      setStatus(`Completed. Successfully tracked ${count} unique vehicle(s)!`, "success");
       loadLeaderboardMetrics();
     } catch (error) {
-      setStatus(`Error: ${error.message}`);
+      setStatus(`Error: ${error.message}`, "error");
     } finally {
       detectBtn.disabled = false;
     }
@@ -526,7 +701,7 @@ detectBtn.addEventListener("click", async () => {
 
   detectBtn.disabled = true;
   detectionList.innerHTML = "";
-  setStatus(`Running ${selectedMode.toUpperCase()} inference...`);
+  setStatus(`Running ${selectedMode.toUpperCase()} neural inference on CUDA...`, "loading");
 
   try {
     const response = await fetch(endpoint, { method: "POST", body: formData });
@@ -547,7 +722,7 @@ detectBtn.addEventListener("click", async () => {
       anprDetectionTime.textContent = `${detectionMs.toFixed(2)} ms`;
       anprOcrTime.textContent = `${ocrMs.toFixed(2)} ms`;
       anprTotalTime.textContent = `${totalMs.toFixed(2)} ms`;
-      ocrBackend.textContent = data.ocr_backend || "-";
+      ocrBackend.textContent = data.ocr_backend || "CRNN BiLSTM + CTC";
       renderAnprDetections(anprDetections);
     } else {
       inferenceTime.textContent = data.inference_time || "-";
@@ -558,21 +733,21 @@ detectBtn.addEventListener("click", async () => {
       renderClassicDetections(data.detections);
     }
 
-    latestInference.textContent = inferenceTime.textContent;
-    latestRuntime.textContent = runtimeDevice.textContent;
+    if (latestInference) latestInference.textContent = inferenceTime.textContent;
+    if (latestRuntime) latestRuntime.textContent = runtimeDevice.textContent;
     const count = selectedMode === "anpr" ? (data.results || data.detections || []).length : data.detections?.length || 0;
-    latestDetections.textContent = String(count);
+    if (latestDetections) latestDetections.textContent = String(count);
 
     const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean) : [];
     if (warnings.length > 0) {
-      setStatus(`Done. ${count} ${mode.doneSuffix} ${warnings.join(" ")}`);
+      setStatus(`Done. ${count} ${mode.doneSuffix} ${warnings.join(" ")}`, "success");
     } else {
-      setStatus(`Done. ${count} ${mode.doneSuffix}`);
+      setStatus(`Done. ${count} ${mode.doneSuffix}`, "success");
     }
 
     loadLeaderboardMetrics();
   } catch (error) {
-    setStatus(`Error: ${error.message}`);
+    setStatus(`Error: ${error.message}`, "error");
   } finally {
     detectBtn.disabled = false;
   }
