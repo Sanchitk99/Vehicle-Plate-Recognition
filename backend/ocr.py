@@ -215,72 +215,72 @@ class OCREngine:
         return raw_plate, mean_conf
 
     def read_text(self, plate_image: np.ndarray) -> Tuple[str, float]:
-        if not self.available or plate_image.size == 0:
+        if plate_image is None or plate_image.size == 0:
             return "", 0.0
 
-        norm_image = self.normalize_crop_dimensions(plate_image, target_height=100)
-        enhanced = self.enhance_contrast(norm_image)
+        candidates: List[Tuple[str, float, str]] = []
 
-        # Primary pass: Spatial EasyOCR with CLAHE and relative box filtering
-        with self._lock:
-            if self._engine_type == "easyocr":
-                try:
+        # 1. Vision Transformer Pass (Microsoft TrOCR - Deep Self-Attention)
+        try:
+            from backend.trocr_engine import get_trocr_engine
+            trocr = get_trocr_engine()
+            t_raw, t_conf = trocr.recognize(plate_image)
+            if t_raw and len(t_raw) >= 6:
+                t_corr = self.correct_indian_plate(t_raw)
+                is_match = bool(INDIAN_PATTERN.fullmatch(t_corr))
+                boosted_conf = min(0.99, t_conf + (0.15 if is_match else 0.0))
+                candidates.append((t_corr or t_raw, boosted_conf, "trocr_transformer"))
+                if is_match and boosted_conf >= 0.88:
+                    return t_corr, boosted_conf
+        except Exception as exc:
+            print(f"[OCR] TrOCR pass error: {exc}")
+
+        # 2. Ultra-Fast BiLSTM CRNN Pass
+        try:
+            from backend.crnn_ocr import crnn_recognizer
+            if crnn_recognizer.available:
+                c_raw, c_conf = crnn_recognizer.predict(plate_image)
+                if c_raw and len(c_raw) >= 6:
+                    c_corr = self.correct_indian_plate(c_raw)
+                    is_match = bool(INDIAN_PATTERN.fullmatch(c_corr))
+                    boosted_conf = min(0.99, c_conf + (0.15 if is_match else 0.0))
+                    candidates.append((c_corr or c_raw, boosted_conf, "crnn_bilstm"))
+                    if is_match and boosted_conf >= 0.90:
+                        return c_corr, boosted_conf
+        except Exception as exc:
+            print(f"[OCR] CRNN pass error: {exc}")
+
+        # 3. EasyOCR Spatial Multi-Line Pass
+        if self.available:
+            try:
+                norm_image = self.normalize_crop_dimensions(plate_image, target_height=100)
+                enhanced = self.enhance_contrast(norm_image)
+                with self._lock:
                     res = self._engine.readtext(
                         enhanced,
                         allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
                         detail=1,
                         paragraph=False,
                     )
-                    text, conf = self.parse_easyocr_boxes(res)
-                    if text and conf >= 0.35:
-                        return text, conf
+                    e_raw, e_conf = self.parse_easyocr_boxes(res)
+                    if e_raw and len(e_raw) >= 5:
+                        e_corr = self.correct_indian_plate(e_raw)
+                        is_match = bool(INDIAN_PATTERN.fullmatch(e_corr))
+                        boosted_conf = min(0.99, e_conf + (0.12 if is_match else 0.0))
+                        candidates.append((e_corr or e_raw, boosted_conf, "easyocr"))
+            except Exception as exc:
+                print(f"[OCR] EasyOCR pass error: {exc}")
 
-                    # Fallback to normalized original crop
-                    res_orig = self._engine.readtext(
-                        norm_image,
-                        allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-                        detail=1,
-                        paragraph=False,
-                    )
-                    text_orig, conf_orig = self.parse_easyocr_boxes(res_orig)
-                    if text_orig and conf_orig >= 0.35:
-                        return text_orig, conf_orig
-                    if text or text_orig:
-                        return (text_orig, conf_orig) if conf_orig > conf else (text, conf)
-                except Exception as exc:
-                    print(f"[OCR] EasyOCR read error: {exc}")
+        if not candidates:
+            return "", 0.0
 
-            elif self._engine_type == "paddleocr":
-                try:
-                    if enhanced.ndim == 2:
-                        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
-                    res = self._engine.ocr(enhanced)
-                    lines = res[0] if (res and isinstance(res[0], list)) else res
-                    if not lines:
-                        return "", 0.0
-
-                    items = []
-                    for line in lines:
-                        if len(line) >= 2 and line[1]:
-                            pts = line[0]
-                            txt = str(line[1][0]).strip()
-                            c = float(line[1][1])
-                            items.append((pts, txt, c))
-                    return self.parse_easyocr_boxes(items)
-                except Exception as exc:
-                    print(f"[OCR] PaddleOCR read error: {exc}")
-
-        # Secondary pass: Dedicated CRNN recognizer
-        try:
-            from backend.crnn_ocr import crnn_recognizer
-            if crnn_recognizer.available:
-                c_text, c_conf = crnn_recognizer.predict(plate_image)
-                if c_text and len(c_text) >= 6:
-                    return c_text, c_conf
-        except Exception:
-            pass
-
-        return "", 0.0
+        # Sort candidates: prioritize valid Indian pattern matches, then highest confidence
+        candidates.sort(
+            key=lambda c: (bool(INDIAN_PATTERN.fullmatch(c[0])), c[1]),
+            reverse=True,
+        )
+        best_text, best_conf, _ = candidates[0]
+        return best_text, round(best_conf, 4)
 
     def correct_indian_plate(self, cleaned_text: str) -> str:
         """Intelligently fix character confusions according to Indian license plate structure."""
