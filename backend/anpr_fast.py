@@ -77,8 +77,12 @@ class OptimizedANPR:
     def __init__(self) -> None:
         weights = os.getenv("ANPR_YOLO_WEIGHTS", "").strip()
         if not weights:
-            weights = "yolov8n.pt"
-            print("[ANPR] WARNING: ANPR_YOLO_WEIGHTS not set. Falling back to yolov8n.pt")
+            default_trained = Path(__file__).resolve().parents[1] / "runs" / "detect" / "plate_train" / "weights" / "best.pt"
+            if default_trained.exists():
+                weights = str(default_trained)
+            else:
+                weights = "runs/detect/plate_train/weights/best.pt" if Path("runs/detect/plate_train/weights/best.pt").exists() else "yolov8n.pt"
+
 
         self.weights = weights
         self.imgsz = IMGSZ
@@ -87,11 +91,6 @@ class OptimizedANPR:
         self.model = YOLO(self.weights)
         self.model.to("cuda" if torch.cuda.is_available() else "cpu")
         self.use_fp16 = self.device.startswith("cuda")
-        if self.use_fp16:
-            try:
-                self.model.model.half()
-            except Exception:
-                self.use_fp16 = False
 
         self._ocr_pool = ThreadPoolExecutor(max_workers=1)
         self._state_lock = Lock()
@@ -424,6 +423,7 @@ class OptimizedANPR:
         det_ms: float,
         reused_boxes: bool,
         thresholds: OCRThresholds,
+        stateless: bool = False,
     ) -> Dict:
         ocr_t0 = time.perf_counter()
         h, w = frame_bgr.shape[:2]
@@ -441,12 +441,9 @@ class OptimizedANPR:
             if crop.size == 0:
                 continue
 
-            crop = self._resize_crop_for_ocr(crop)
-            prep = self._preprocess_for_ocr(crop)
-
-            # OCR result cache: skip OCR if bbox is almost unchanged.
+            # OCR result cache: skip OCR if bbox is almost unchanged (video streams only).
             cached_iou = self._bbox_iou(bbox, self._last_plate_cache.get("bbox", []))
-            used_cached_ocr = cached_iou >= OCR_CACHE_IOU and bool(self._last_plate_cache.get("plate"))
+            used_cached_ocr = (not stateless) and (cached_iou >= OCR_CACHE_IOU) and bool(self._last_plate_cache.get("plate"))
             variant_used = "cache"
 
             if used_cached_ocr:
@@ -457,40 +454,14 @@ class OptimizedANPR:
                 match = bool(INDIAN_PLATE_RE.fullmatch(final_text))
                 format_valid = bool(match)
             else:
-                # Pass 1: fast single-pass on default preprocessing.
-                raw_text, ocr_conf = ocr_engine.read_text(prep)
-                corrected, match = self._correct_text(raw_text)
-                final_text, format_valid = self._accept_ocr_text(corrected, match, float(ocr_conf), thresholds)
-                variant_used = "default_otsu"
+                raw_text, ocr_conf = ocr_engine.read_text(crop)
+                corrected = ocr_engine.correct_indian_plate(raw_text)
+                match = bool(INDIAN_PLATE_RE.fullmatch(corrected))
+                final_text = corrected if corrected else raw_text
+                format_valid = bool(match)
+                variant_used = ocr_engine.backend_name
 
-                # Pass 2: multi-pass fallback when low confidence or invalid format.
-                if (not final_text) or (ocr_conf < thresholds.high):
-                    fb_raw, fb_text, fb_conf, fb_variant = self._run_ocr_fallback(
-                        crop,
-                        ocr_high=thresholds.high,
-                        max_variants=OCR_VARIANT_MAX,
-                    )
-                    if fb_text:
-                        fb_match = bool(INDIAN_PLATE_RE.fullmatch(fb_text))
-                        fb_final_text, fb_format_valid = self._accept_ocr_text(
-                            fb_text,
-                            fb_match,
-                            float(fb_conf),
-                            thresholds,
-                        )
-                        # Regex adds a bonus, but never acts as a hard reject.
-                        base_score = float(ocr_conf) + (0.05 if bool(match) else 0.0)
-                        fb_score = float(fb_conf) + (0.05 if fb_match else 0.0)
-                        if fb_final_text and (not final_text or fb_score > base_score):
-                            raw_text = fb_raw
-                            corrected = fb_text
-                            ocr_conf = fb_conf
-                            final_text = fb_final_text
-                            match = fb_match
-                            format_valid = fb_format_valid
-                            variant_used = f"fallback_{fb_variant}"
-
-                if final_text:
+                if (not stateless) and final_text:
                     self._last_plate_cache = {
                         "bbox": list(bbox),
                         "plate": final_text,
@@ -501,7 +472,7 @@ class OptimizedANPR:
 
             crop_path, prep_path = "", ""
             if SAVE_DEBUG and DEBUG:
-                crop_path, prep_path = self._save_debug_pair(frame_dir, i, crop, prep)
+                crop_path, prep_path = self._save_debug_pair(frame_dir, i, crop, crop)
 
             if DEBUG:
                 print(f"[ANPR][frame={frame_id}] det_conf={det['det_confidence']:.4f} bbox={bbox}")
@@ -517,14 +488,24 @@ class OptimizedANPR:
             candidates.append(
                 {
                     "bbox": bbox,
+                    "plate_bbox": bbox,
+                    "plate": final_text,
+                    "plate_text": final_text,
+                    "cleaned_text": final_text,
+                    "raw_text": raw_text,
                     "raw_ocr": raw_text,
                     "corrected_ocr": corrected,
-                    "plate": final_text,
                     "det_confidence": round(float(det["det_confidence"]), 4),
                     "ocr_confidence": round(float(ocr_conf), 4),
+                    "confidence": round(float(ocr_conf), 4),
+                    "indian_format_like": bool(format_valid),
                     "indian_regex_match": bool(match and final_text),
                     "format_valid": bool(format_valid),
+                    "ocr_method": variant_used,
+                    "method_used": variant_used,
+                    "source_variant": variant_used,
                     "variant_used": variant_used,
+                    "inference_time": f"{(time.perf_counter() - ocr_t0) * 1000.0:.2f} ms",
                     "used_cached_ocr": used_cached_ocr,
                     "debug": {
                         "crop_path": crop_path,
@@ -539,7 +520,12 @@ class OptimizedANPR:
 
         best = max(
             candidates,
-            key=lambda x: (1 if x["plate"] else 0, x["ocr_confidence"], x["det_confidence"]),
+            key=lambda x: (
+                1 if x.get("indian_regex_match") else 0,
+                1 if len(x.get("plate", "")) >= 8 else 0,
+                1 if x.get("plate") else 0,
+                float(x.get("ocr_confidence", 0.0)) * float(x.get("det_confidence", 1.0)),
+            ),
             default=None,
         )
 
@@ -549,13 +535,22 @@ class OptimizedANPR:
         raw = best["raw_ocr"] if best else ""
         corrected = best["corrected_ocr"] if best else ""
         format_valid = bool(best["format_valid"]) if best else False
-        final_plate, final_conf, final_bbox, stabilized, is_valid, state = self._finalize_plate_state(plate, conf, bbox)
-        if final_plate and final_plate != corrected:
-            corrected = final_plate
-        if not raw and final_plate:
-            raw = final_plate
-        if final_plate:
-            format_valid = bool(INDIAN_PLATE_RE.fullmatch(final_plate)) if corrected == final_plate else format_valid
+
+        if stateless:
+            final_plate = plate
+            final_conf = conf
+            final_bbox = bbox
+            stabilized = False
+            is_valid = bool(final_plate)
+            state = "stable" if is_valid else "searching"
+        else:
+            final_plate, final_conf, final_bbox, stabilized, is_valid, state = self._finalize_plate_state(plate, conf, bbox)
+            if final_plate and final_plate != corrected:
+                corrected = final_plate
+            if not raw and final_plate:
+                raw = final_plate
+            if final_plate:
+                format_valid = bool(INDIAN_PLATE_RE.fullmatch(final_plate)) if corrected == final_plate else format_valid
 
         total_ms = det_ms + ocr_ms
 
@@ -716,7 +711,15 @@ class OptimizedANPR:
                             "det_confidence": max(0.30, float(self._last_valid_conf)),
                         }
                     ]
-                return self._ocr_task(frame_id, frame_bgr, detections, det_ms, reused_boxes=False, thresholds=thresholds)
+                return self._ocr_task(
+                    frame_id,
+                    frame_bgr,
+                    detections,
+                    det_ms,
+                    reused_boxes=False,
+                    thresholds=thresholds,
+                    stateless=stateless,
+                )
             finally:
                 if state_backup is not None:
                     self._last_plate_cache = state_backup["last_plate_cache"]
@@ -766,16 +769,37 @@ def run_anpr_pipeline(
     )
 
     # Compatibility keys used by existing API/frontend.
+    h_img, w_img = image_bgr.shape[:2]
+    font_scale = max(0.65, min(2.0, w_img / 1200.0))
+    thickness = max(1, int(font_scale * 2))
+    box_thickness = max(2, int(w_img / 500.0))
+
     annotated = image_bgr.copy()
     for row in result.get("detections", []):
         bbox = row.get("bbox", [])
         if len(bbox) != 4:
             continue
         x1, y1, x2, y2 = bbox
-        label = row.get("plate") or "plate"
-        conf = float(row.get("det_confidence", 0.0))
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (34, 197, 94), 2)
-        cv2.putText(annotated, f"{label} {conf:.2f}", (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (34, 197, 94), 2)
+        label = str(row.get("plate_text") or row.get("plate") or "plate")
+        conf = float(row.get("ocr_confidence") or row.get("det_confidence") or 0.0)
+        display_str = f"{label} ({int(conf * 100)}%)"
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (34, 197, 94), box_thickness)
+        (tw, th), _ = cv2.getTextSize(display_str, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        label_y1 = max(0, y1 - th - 10)
+        label_y2 = y1
+        label_x2 = min(w_img, x1 + tw + 10)
+        cv2.rectangle(annotated, (x1, label_y1), (label_x2, label_y2), (34, 197, 94), -1)
+        cv2.putText(
+            annotated,
+            display_str,
+            (x1 + 5, label_y2 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (0, 0, 0),
+            thickness,
+            cv2.LINE_AA,
+        )
 
     result["results"] = result.get("detections", [])
     result["timings"] = {

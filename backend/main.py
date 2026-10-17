@@ -1,3 +1,5 @@
+import os
+import time
 from pathlib import Path
 from typing import Dict
 
@@ -5,8 +7,6 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-
-import os
 
 from backend.anpr import run_anpr_pipeline
 from backend.model import detect_with_fallback, get_plate_detector, plate_detector_error, vehicle_detector
@@ -40,8 +40,15 @@ def _validate_threshold(name: str, value: float) -> None:
 
 
 async def _read_upload_image(file: UploadFile) -> "object":
-    if file.content_type not in {"image/jpeg", "image/png", "image/jpg"}:
-        raise HTTPException(status_code=400, detail="Only JPEG/PNG images are supported.")
+    filename = (file.filename or "").lower()
+    ext = Path(filename).suffix
+    content_type = (file.content_type or "").lower()
+
+    if content_type.startswith("video/") or ext in {".mp4", ".avi", ".mov", ".mkv", ".webm"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Video file detected! Please switch to the 'Video ANPR' tab to process video files.",
+        )
 
     file_bytes = await file.read()
     if not file_bytes:
@@ -50,7 +57,10 @@ async def _read_upload_image(file: UploadFile) -> "object":
     try:
         return read_image_from_bytes(file_bytes)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not decode image. Please upload a valid image (JPEG, PNG, WEBP, BMP).",
+        ) from exc
 
 
 def _build_detection_response(
@@ -121,7 +131,14 @@ async def ui() -> FileResponse:
     index_path = FRONTEND_DIR / "index.html"
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Frontend not found.")
-    return FileResponse(index_path)
+    return FileResponse(
+        index_path,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.post("/detect")
@@ -189,3 +206,58 @@ async def run_anpr(
         ocr_confidence=ocr_confidence,
         ocr_engine=ocr_engine,
     )
+
+
+@app.post("/anpr/video")
+async def run_anpr_video(
+    file: UploadFile = File(...),
+    det_confidence: float = Form(0.25),
+    ocr_confidence: float = Form(0.30),
+    frame_stride: int = Form(2),
+) -> Dict:
+    _validate_threshold("det_confidence", det_confidence)
+    _validate_threshold("ocr_confidence", ocr_confidence)
+    if frame_stride < 1 or frame_stride > 30:
+        raise HTTPException(status_code=400, detail="frame_stride must be between 1 and 30.")
+
+    ext = Path(file.filename or "video.mp4").suffix.lower()
+    if ext not in {".mp4", ".avi", ".mov", ".mkv", ".webm"}:
+        raise HTTPException(status_code=400, detail="Supported video formats: .mp4, .avi, .mov, .mkv, .webm")
+
+    timestamp = int(time.time() * 1000)
+    upload_dir = BASE_DIR / "runs" / "video_uploads"
+    output_dir = BASE_DIR / "runs" / "video_outputs"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    input_file_path = upload_dir / f"upload_{timestamp}{ext}"
+    output_file_name = f"anpr_{timestamp}.mp4"
+    output_file_path = output_dir / output_file_name
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty video file upload.")
+    input_file_path.write_bytes(content)
+
+    from backend.video import process_video_file
+
+    try:
+        result = process_video_file(
+            input_path=str(input_file_path),
+            output_path=str(output_file_path),
+            det_confidence=det_confidence,
+            ocr_confidence=ocr_confidence,
+            frame_stride=frame_stride,
+        )
+        result["video_url"] = f"/runs/video_outputs/{output_file_name}"
+        result["filename"] = file.filename
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Video processing failed: {exc}") from exc
+    finally:
+        if input_file_path.exists():
+            try:
+                input_file_path.unlink()
+            except Exception:
+                pass
+

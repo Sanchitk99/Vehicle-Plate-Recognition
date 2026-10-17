@@ -27,75 +27,22 @@ def normalize_plate_text(raw_text: str) -> str:
 
 
 def apply_common_ocr_fixes(text: str) -> str:
-    # Global cleanup pass for the most frequent OCR confusions.
-    return "".join(LETTER_TO_DIGIT.get(ch, ch) for ch in text)
+    from backend.ocr import ocr_engine
+    return ocr_engine.correct_indian_plate(text)
 
 
 def is_indian_plate_like(text: str) -> bool:
     return bool(INDIAN_PLATE_RE.fullmatch(text))
 
 
-def _force_char_type(char: str, expected: str) -> str:
-    if expected == "L":
-        if char.isalpha():
-            return char
-        return DIGIT_TO_LETTER.get(char, char)
-    if expected == "D":
-        if char.isdigit():
-            return char
-        return LETTER_TO_DIGIT.get(char, char)
-    return char
-
-
-def _apply_template(text: str, template: str) -> Tuple[str, int]:
-    corrected = []
-    edits = 0
-    for char, token in zip(text, template):
-        forced = _force_char_type(char, token)
-        if forced != char:
-            edits += 1
-        corrected.append(forced)
-    return "".join(corrected), edits
-
-
-def _candidate_templates(text_len: int) -> List[str]:
-    templates = []
-    for district_len in (2, 1):
-        for series_len in (3, 2, 1):
-            template = "LL" + ("D" * district_len) + ("L" * series_len) + "DDDD"
-            if len(template) == text_len:
-                templates.append(template)
-    if text_len == len(DEFAULT_TEMPLATE):
-        templates.insert(0, DEFAULT_TEMPLATE)
-    return templates
-
-
 def enforce_indian_format(text: str) -> Tuple[str, bool]:
     if not text:
         return "", False
-    if is_indian_plate_like(text):
-        return text, True
+    from backend.ocr import ocr_engine
+    corrected = ocr_engine.correct_indian_plate(text)
+    is_match = is_indian_plate_like(corrected)
+    return corrected, is_match
 
-    templates = _candidate_templates(len(text))
-    if not templates:
-        return text, False
-
-    best = text
-    best_match = False
-    best_edits = 10**9
-    for template in templates:
-        corrected, edits = _apply_template(text, template)
-        if is_indian_plate_like(corrected):
-            if edits < best_edits:
-                best = corrected
-                best_match = True
-                best_edits = edits
-
-    # Force strict layout for 10-char strings even when regex does not fully match.
-    if not best_match and len(text) == len(DEFAULT_TEMPLATE):
-        forced, _ = _apply_template(text, DEFAULT_TEMPLATE)
-        return forced, False
-    return best, best_match
 
 
 def select_best_plate_candidate(
